@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env.local
+uploads/images/*
+uploads/documents/*
+uploads/avatars/*
+!uploads/images/.gitkeep
+!uploads/documents/.gitkeep
+!uploads/avatars/.gitkeep
+.env
