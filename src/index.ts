@@ -146,6 +146,19 @@ app.listen(PORT, async () => {
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'ig_business_account_id', '', 'text', 'ID du compte Instagram Business', 'Identifiant du compte Instagram lié à la page Facebook', 'automation', 12)",
     // Stripe checkout branding
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'checkout_background_image', '', 'text', 'Image de fond Checkout', 'URL d\\'une image de fond affichée dans la page de paiement Stripe', 'payments', 30)",
+    // 2FA settings
+    "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), '2fa_enabled', 'false', 'boolean', 'Authentification à deux facteurs', 'Activer la vérification par code email lors de la connexion', 'auth', 60)",
+    // 2FA codes table
+    `CREATE TABLE IF NOT EXISTS two_factor_codes (
+      id VARCHAR(36) PRIMARY KEY,
+      user_id VARCHAR(36) NOT NULL,
+      code_hash VARCHAR(255) NOT NULL,
+      expires_at TIMESTAMP NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )`,
+    // Add 2fa_enabled column to users
+    'ALTER TABLE users ADD COLUMN two_factor_enabled TINYINT(1) NOT NULL DEFAULT 1',
     // Event confirmation email settings
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'event_email_enabled', 'true', 'boolean', 'Email inscription événement', 'Envoyer un email de confirmation lors de l\\'inscription à un événement', 'events', 1)",
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'event_email_subject', 'Inscription confirmée — {{EVENT}}', 'text', 'Sujet de l\\'email', 'Sujet du mail. Utilisez {{EVENT}} pour le nom de l\\'événement', 'events', 2)",
