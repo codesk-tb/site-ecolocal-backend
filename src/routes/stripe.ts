@@ -3,6 +3,7 @@ import pool from '../db/connection';
 import { authenticate, requireAdmin } from '../middleware/auth';
 import Stripe from 'stripe';
 import { v4 as uuid } from 'uuid';
+import { decrypt, isSecretKey, decryptSettings } from '../utils/crypto';
 
 const router = Router();
 
@@ -17,6 +18,7 @@ async function getStripe(): Promise<Stripe> {
   );
   const settings: Record<string, string> = {};
   for (const r of rows as any[]) settings[r.setting_key] = r.setting_value;
+  decryptSettings(settings);
 
   if (settings.stripe_enabled !== 'true') {
     throw new Error('Stripe n\'est pas activé. Activez-le dans Paramètres → Paiements.');
@@ -34,7 +36,8 @@ export function resetStripeCache() { _stripe = null; }
 
 async function getSetting(key: string): Promise<string> {
   const [rows] = await pool.query('SELECT setting_value FROM site_settings WHERE setting_key = ?', [key]);
-  return (rows as any[])[0]?.setting_value || '';
+  const raw = (rows as any[])[0]?.setting_value || '';
+  return isSecretKey(key) ? decrypt(raw) : raw;
 }
 
 async function getCheckoutBranding(): Promise<{

@@ -1,10 +1,23 @@
 import { Router } from 'express';
 import pool from '../db/connection';
 import { authenticate, requireAdmin } from '../middleware/auth';
+import { encrypt, decrypt, isSecretKey } from '../utils/crypto';
 
 const router = Router();
 
-// GET /api/site-settings
+// Keys that contain secrets and must NEVER be exposed publicly
+const SECRET_KEYS = new Set([
+  'stripe_secret_key',
+  'stripe_webhook_secret',
+  'email_smtp_pass',
+  'fb_page_access_token',
+  'ig_business_account_id',
+]);
+
+// Categories that are entirely private (admin-only)
+const PRIVATE_CATEGORIES = new Set(['emails', 'automation']);
+
+// GET /api/site-settings — public, secrets are filtered out
 router.get('/', async (req, res) => {
   try {
     const { category } = req.query;
@@ -16,9 +29,13 @@ router.get('/', async (req, res) => {
     }
     const [rows] = await pool.query(query, params);
 
-    // Transform to key-value object
+    // Transform to key-value object, filtering out secrets
     const settings: Record<string, string> = {};
     (rows as any[]).forEach(row => {
+      // Skip secret keys and private categories on public endpoint
+      if (SECRET_KEYS.has(row.setting_key)) return;
+      if (PRIVATE_CATEGORIES.has(row.category)) return;
+      if (row.setting_type === 'secret') return;
       settings[row.setting_key] = row.setting_value;
     });
 
@@ -34,9 +51,10 @@ router.get('/raw', authenticate, requireAdmin, async (_req, res) => {
   try {
     const [rows] = await pool.query('SELECT * FROM site_settings ORDER BY category, display_order, setting_key');
     
-    // Ensure all rows have label fallback
+    // Ensure all rows have label fallback, decrypt secrets for admin view
     const result = (rows as any[]).map(row => ({
       ...row,
+      setting_value: isSecretKey(row.setting_key) ? decrypt(row.setting_value || '') : row.setting_value,
       label: row.label || row.setting_key.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
       setting_type: row.setting_type || 'text',
     }));
@@ -51,7 +69,9 @@ router.get('/raw', authenticate, requireAdmin, async (_req, res) => {
 // PUT /api/site-settings — upsert single
 router.put('/', authenticate, requireAdmin, async (req, res) => {
   try {
-    const { setting_key, setting_value, category } = req.body;
+    const { setting_key, category } = req.body;
+    // Encrypt secret values before storing
+    const setting_value = isSecretKey(setting_key) ? encrypt(req.body.setting_value || '') : req.body.setting_value;
 
     const [existing] = await pool.query(
       'SELECT id FROM site_settings WHERE setting_key = ?',
@@ -85,6 +105,8 @@ router.put('/batch', authenticate, requireAdmin, async (req, res) => {
     if (!Array.isArray(settings)) return res.status(400).json({ error: 'Settings requis' });
 
     for (const item of settings) {
+      // Encrypt secret values before storing
+      const value = isSecretKey(item.setting_key) ? encrypt(item.setting_value || '') : item.setting_value;
       const [existing] = await pool.query(
         'SELECT id FROM site_settings WHERE setting_key = ?',
         [item.setting_key]
@@ -93,13 +115,13 @@ router.put('/batch', authenticate, requireAdmin, async (req, res) => {
       if (Array.isArray(existing) && existing.length > 0) {
         await pool.query(
           'UPDATE site_settings SET setting_value = ?, updated_at = NOW() WHERE setting_key = ?',
-          [item.setting_value, item.setting_key]
+          [value, item.setting_key]
         );
       } else {
         const id = require('uuid').v4();
         await pool.query(
           'INSERT INTO site_settings (id, setting_key, setting_value, category) VALUES (?, ?, ?, ?)',
-          [id, item.setting_key, item.setting_value, item.category || 'general']
+          [id, item.setting_key, value, item.category || 'general']
         );
       }
     }

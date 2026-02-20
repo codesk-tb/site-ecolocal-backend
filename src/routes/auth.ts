@@ -4,6 +4,7 @@ import nodemailer from 'nodemailer';
 import { v4 as uuidv4 } from 'uuid';
 import pool from '../db/connection';
 import { authenticate, generateToken, optionalAuth, requireAdmin } from '../middleware/auth';
+import { decryptSettings } from '../utils/crypto';
 
 const router = Router();
 
@@ -17,7 +18,7 @@ async function getEmailSettings(): Promise<Record<string, string>> {
   for (const row of rows as any[]) {
     settings[row.setting_key] = row.setting_value || '';
   }
-  return settings;
+  return decryptSettings(settings);
 }
 
 function generateResetCode(): string {
@@ -100,14 +101,8 @@ router.post('/login', async (req, res) => {
     );
     const isAdmin = Array.isArray(roleRows) && roleRows.length > 0;
 
-    // ─── 2FA check ────────────────────────────────────────────
-    const [twoFaSettingRows] = await pool.query(
-      "SELECT setting_value FROM site_settings WHERE setting_key = '2fa_enabled' LIMIT 1"
-    );
-    const globalTwoFa = Array.isArray(twoFaSettingRows) && (twoFaSettingRows as any[])[0]?.setting_value === 'true';
-    const userTwoFa = user.two_factor_enabled !== 0; // default true
-
-    if (globalTwoFa && userTwoFa) {
+    // 2FA check 
+    if (user.two_factor_enabled === 1) {
       // Generate and send 2FA code
       const code = Math.floor(100000 + Math.random() * 900000).toString();
       const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
@@ -177,7 +172,7 @@ router.post('/login', async (req, res) => {
       });
     }
 
-    // ─── No 2FA — normal login ────────────────────────────────
+    //  No 2FA normal login 
     const token = generateToken({ id: user.id, email: user.email });
     
     res.cookie('token', token, {
@@ -359,14 +354,116 @@ router.post('/resend-2fa', async (req, res) => {
   }
 });
 
-// PUT /api/auth/toggle-2fa — toggle per-user 2FA
+// PUT /api/auth/toggle-2fa — request 2FA activation (sends code) or disable
 router.put('/toggle-2fa', authenticate, async (req, res) => {
   try {
     const { enabled } = req.body;
-    await pool.query('UPDATE users SET two_factor_enabled = ? WHERE id = ?', [enabled ? 1 : 0, req.user!.id]);
-    res.json({ message: enabled ? '2FA activée' : '2FA désactivée' });
+
+    // ─── Disabling 2FA — instant ──────────────────────────────
+    if (!enabled) {
+      await pool.query('UPDATE users SET two_factor_enabled = 0 WHERE id = ?', [req.user!.id]);
+      return res.json({ message: '2FA désactivée' });
+    }
+
+    // ─── Enabling 2FA — send confirmation code first ─────────
+    const [rows] = await pool.query('SELECT * FROM users WHERE id = ?', [req.user!.id]);
+    const user = (rows as any[])[0];
+    if (!user) return res.status(404).json({ error: 'Utilisateur non trouvé' });
+
+    // If already enabled, nothing to do
+    if (user.two_factor_enabled === 1) {
+      return res.json({ message: '2FA déjà activée' });
+    }
+
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    await pool.query('DELETE FROM two_factor_codes WHERE user_id = ?', [user.id]);
+    const codeHash = await bcrypt.hash(code, 10);
+    await pool.query(
+      'INSERT INTO two_factor_codes (id, user_id, code_hash, expires_at) VALUES (?, ?, ?, ?)',
+      [uuidv4(), user.id, codeHash, expiresAt]
+    );
+
+    // Send email
+    const emailSettings = await getEmailSettings();
+    if (emailSettings.email_provider === 'nodemailer' && emailSettings.email_smtp_host) {
+      try {
+        const transporter = nodemailer.createTransport({
+          host: emailSettings.email_smtp_host,
+          port: parseInt(emailSettings.email_smtp_port || '587'),
+          secure: emailSettings.email_smtp_secure === 'true',
+          auth: { user: emailSettings.email_smtp_user, pass: emailSettings.email_smtp_pass },
+          tls: { rejectUnauthorized: false },
+        });
+        const [siteRows] = await pool.query("SELECT setting_value FROM site_settings WHERE setting_key = 'site_name' LIMIT 1") as any[];
+        const siteName = siteRows[0]?.setting_value || 'Site Web';
+        const fromName = emailSettings.email_from_name || siteName;
+        const fromEmail = emailSettings.email_smtp_user;
+
+        await transporter.sendMail({
+          from: `${fromName} <${fromEmail}>`,
+          to: user.email,
+          subject: `${siteName} — Activation de la double authentification`,
+          html: `
+            <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:20px">
+              <h2 style="color:#333;text-align:center">${siteName}</h2>
+              <p>Bonjour${user.first_name ? ' ' + user.first_name : ''},</p>
+              <p>Vous avez demandé l'activation de la double authentification. Voici votre code de confirmation :</p>
+              <div style="text-align:center;margin:30px 0">
+                <span style="font-size:32px;font-weight:bold;letter-spacing:8px;background:#f3f4f6;padding:16px 32px;border-radius:8px;display:inline-block">${code}</span>
+              </div>
+              <p style="color:#666;font-size:14px">Ce code est valable <strong>10 minutes</strong>. Si vous n'avez pas fait cette demande, ignorez cet email.</p>
+              <hr style="border:none;border-top:1px solid #eee;margin:24px 0">
+              <p style="color:#999;font-size:12px;text-align:center">${siteName}</p>
+            </div>
+          `,
+          text: `Code d'activation 2FA : ${code}\n\nCe code est valable 10 minutes.`,
+        });
+      } catch (emailErr) {
+        console.error('Error sending 2FA setup email:', emailErr);
+      }
+    } else {
+      console.log(`[2FA Setup Code] ${user.email}: ${code}`);
+    }
+
+    res.json({ codeSent: true, message: 'Un code de confirmation a été envoyé à votre adresse email.' });
   } catch (error) {
     console.error('Toggle 2FA error:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// POST /api/auth/confirm-2fa-setup — confirm 2FA activation with code
+router.post('/confirm-2fa-setup', authenticate, async (req, res) => {
+  try {
+    const { code } = req.body;
+    if (!code) return res.status(400).json({ error: 'Code requis' });
+
+    const userId = req.user!.id;
+
+    const [codeRows] = await pool.query(
+      'SELECT * FROM two_factor_codes WHERE user_id = ? AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1',
+      [userId]
+    );
+    const codes = codeRows as any[];
+
+    if (codes.length === 0) {
+      return res.status(400).json({ error: 'Code expiré. Veuillez réessayer.' });
+    }
+
+    const valid = await bcrypt.compare(code, codes[0].code_hash);
+    if (!valid) {
+      return res.status(400).json({ error: 'Code incorrect' });
+    }
+
+    // Code is valid — enable 2FA
+    await pool.query('UPDATE users SET two_factor_enabled = 1 WHERE id = ?', [userId]);
+    await pool.query('DELETE FROM two_factor_codes WHERE user_id = ?', [userId]);
+
+    res.json({ message: '2FA activée avec succès' });
+  } catch (error) {
+    console.error('Confirm 2FA setup error:', error);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });
@@ -406,7 +503,7 @@ router.get('/admin-profile', authenticate, requireAdmin, async (req, res) => {
 router.get('/me', authenticate, async (req, res) => {
   try {
     const [rows] = await pool.query(
-      'SELECT id, email, full_name, first_name, last_name, phone, avatar_url, created_at FROM users WHERE id = ?',
+      'SELECT id, email, full_name, first_name, last_name, phone, avatar_url, created_at, two_factor_enabled FROM users WHERE id = ?',
       [req.user!.id]
     );
     const users = rows as any[];

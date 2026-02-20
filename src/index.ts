@@ -1,10 +1,12 @@
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
 import path from 'path';
 import { rateLimit } from 'express-rate-limit';
 import pool from './db/connection';
+import { isSecretKey, encrypt } from './utils/crypto';
 
 // Routes
 import authRoutes from './routes/auth';
@@ -43,7 +45,22 @@ const limiter = rateLimit({
   legacyHeaders: false,
 });
 
+app.use(helmet());
 app.use(limiter);
+
+// Strict rate limit on authentication routes (login, register, 2FA)
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 20, // max 20 attempts per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Trop de tentatives. Veuillez réessayer dans 15 minutes.' },
+});
+app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/register', authLimiter);
+app.use('/api/auth/verify-2fa', authLimiter);
+app.use('/api/auth/forgot-password', authLimiter);
+
 app.use(cors({
   origin: process.env.FRONTEND_URL || 'http://localhost:3000',
   credentials: true,
@@ -157,8 +174,10 @@ app.listen(PORT, async () => {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )`,
-    // Add 2fa_enabled column to users
-    'ALTER TABLE users ADD COLUMN two_factor_enabled TINYINT(1) NOT NULL DEFAULT 1',
+    // Add 2fa_enabled column to users (default OFF — user must opt in)
+    'ALTER TABLE users ADD COLUMN two_factor_enabled TINYINT(1) NOT NULL DEFAULT 0',
+    // Fix: reset any users that had 2FA on by default
+    'UPDATE users SET two_factor_enabled = 0 WHERE two_factor_enabled = 1',
     // Event confirmation email settings
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'event_email_enabled', 'true', 'boolean', 'Email inscription événement', 'Envoyer un email de confirmation lors de l\\'inscription à un événement', 'events', 1)",
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'event_email_subject', 'Inscription confirmée — {{EVENT}}', 'text', 'Sujet de l\\'email', 'Sujet du mail. Utilisez {{EVENT}} pour le nom de l\\'événement', 'events', 2)",
@@ -201,6 +220,20 @@ app.listen(PORT, async () => {
 
   for (const sql of migrations) {
     try { await pool.query(sql); } catch (_) { /* column/row already exists */ }
+  }
+
+  // ─── Encrypt any plaintext secrets still in site_settings ───
+  try {
+    const [secretRows] = await pool.query('SELECT setting_key, setting_value FROM site_settings') as any[];
+    for (const row of secretRows) {
+      if (isSecretKey(row.setting_key) && row.setting_value && !row.setting_value.startsWith('enc:')) {
+        const encrypted = encrypt(row.setting_value);
+        await pool.query('UPDATE site_settings SET setting_value = ? WHERE setting_key = ?', [encrypted, row.setting_key]);
+        console.log(`🔒 Encrypted existing secret: ${row.setting_key}`);
+      }
+    }
+  } catch (err) {
+    console.error('Secret encryption migration error:', err);
   }
 
   // ─── Mark stale pending donations/memberships (>1 day) as expired on startup ───

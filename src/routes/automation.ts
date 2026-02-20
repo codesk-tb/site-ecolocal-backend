@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import pool from '../db/connection';
 import { authenticate, requireAdmin } from '../middleware/auth';
+import { decryptSettings } from '../utils/crypto';
 
 const router = Router();
 
@@ -14,7 +15,7 @@ async function getAutomationSettings(): Promise<Record<string, string>> {
   (rows as any[]).forEach((r: any) => {
     settings[r.setting_key] = r.setting_value || '';
   });
-  return settings;
+  return decryptSettings(settings);
 }
 
 /**

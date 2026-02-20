@@ -16,7 +16,12 @@ declare global {
   }
 }
 
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
+const _jwtSecret = process.env.JWT_SECRET;
+if (!_jwtSecret) {
+  console.error('\x1b[31m[FATAL] JWT_SECRET is not set in environment variables. Server cannot start securely.\x1b[0m');
+  process.exit(1);
+}
+const JWT_SECRET: string = _jwtSecret;
 
 export function authenticate(req: Request, res: Response, next: NextFunction) {
   const token = req.headers.authorization?.replace('Bearer ', '') || req.cookies?.token;

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import nodemailer from 'nodemailer';
 import pool from '../db/connection';
 import { authenticate, requireAdmin, optionalAuth } from '../middleware/auth';
+import { decryptSettings } from '../utils/crypto';
 
 const router = Router();
 
@@ -15,7 +16,7 @@ async function getEmailSettings(): Promise<Record<string, string>> {
   for (const row of rows as any[]) {
     settings[row.setting_key] = row.setting_value;
   }
-  return settings;
+  return decryptSettings(settings);
 }
 
 function createTransporter(settings: Record<string, string>) {
