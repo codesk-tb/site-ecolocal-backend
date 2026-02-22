@@ -17,6 +17,12 @@ const SECRET_KEYS = new Set([
 // Categories that are entirely private (admin-only)
 const PRIVATE_CATEGORIES = new Set(['emails', 'automation']);
 
+// Keys from private categories that are safe to expose publicly
+const PUBLIC_ALLOWED_KEYS = new Set([
+  'newsletter_enabled',
+  'email_from_name',
+]);
+
 // GET /api/site-settings — public, secrets are filtered out
 router.get('/', async (req, res) => {
   try {
@@ -32,10 +38,11 @@ router.get('/', async (req, res) => {
     // Transform to key-value object, filtering out secrets
     const settings: Record<string, string> = {};
     (rows as any[]).forEach(row => {
-      // Skip secret keys and private categories on public endpoint
+      // Skip secret keys
       if (SECRET_KEYS.has(row.setting_key)) return;
-      if (PRIVATE_CATEGORIES.has(row.category)) return;
       if (row.setting_type === 'secret') return;
+      // For private categories, only allow explicitly whitelisted keys
+      if (PRIVATE_CATEGORIES.has(row.category) && !PUBLIC_ALLOWED_KEYS.has(row.setting_key)) return;
       settings[row.setting_key] = row.setting_value;
     });
 

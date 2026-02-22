@@ -1,9 +1,11 @@
 import { Router } from 'express';
+import nodemailer from 'nodemailer';
 import pool from '../db/connection';
 import { authenticate, requireAdmin } from '../middleware/auth';
 import Stripe from 'stripe';
 import { v4 as uuid } from 'uuid';
 import { decrypt, isSecretKey, decryptSettings } from '../utils/crypto';
+import { buildReceiptPDFBuffer, getReceiptSettings, generateReceiptNumber, ReceiptData } from './receipts';
 
 const router = Router();
 
@@ -82,6 +84,195 @@ async function getOrCreateStripeCustomer(stripe: Stripe, userId: string, email: 
 
   await pool.query('UPDATE users SET stripe_customer_id = ? WHERE id = ?', [customer.id, userId]);
   return customer.id;
+}
+
+// ─── Email helpers ───
+
+async function getEmailSettings(): Promise<Record<string, string>> {
+  const [rows] = await pool.query(
+    "SELECT setting_key, setting_value FROM site_settings WHERE category = 'emails'"
+  );
+  const settings: Record<string, string> = {};
+  for (const row of rows as any[]) {
+    settings[row.setting_key] = row.setting_value || '';
+  }
+  return decryptSettings(settings);
+}
+
+function createTransporter(settings: Record<string, string>) {
+  const host = settings.email_smtp_host;
+  const port = parseInt(settings.email_smtp_port || '587');
+  const secure = settings.email_smtp_secure === 'true';
+  const user = settings.email_smtp_user;
+  const pass = settings.email_smtp_pass;
+  if (!host || !user || !pass) return null;
+  return nodemailer.createTransport({
+    host, port, secure,
+    auth: { user, pass },
+    tls: { rejectUnauthorized: false },
+  });
+}
+
+async function sendReceiptEmail(
+  recipientEmail: string,
+  recipientName: string,
+  receiptData: ReceiptData
+) {
+  try {
+    const emailSettings = await getEmailSettings();
+    if (emailSettings.email_provider !== 'nodemailer' || !emailSettings.email_smtp_host) return;
+
+    const transporter = createTransporter(emailSettings);
+    if (!transporter) return;
+
+    const receiptSettings = await getReceiptSettings();
+    const pdfBuffer = await buildReceiptPDFBuffer(receiptSettings, receiptData);
+
+    const [siteRows] = await pool.query(
+      "SELECT setting_value FROM site_settings WHERE setting_key = 'site_name' LIMIT 1"
+    ) as any[];
+    const siteName = siteRows[0]?.setting_value || 'Ecolocal';
+    const fromName = emailSettings.email_from_name || siteName;
+    const fromEmail = emailSettings.email_from_address || emailSettings.email_smtp_user;
+
+    const [colorRows] = await pool.query(
+      "SELECT setting_value FROM site_settings WHERE setting_key = 'theme_primary_color' LIMIT 1"
+    ) as any[];
+    const primaryHsl = colorRows[0]?.setting_value || '142 72% 29%';
+    // Convert HSL to a safe hex for email
+    const primaryColor = receiptSettings.receipt_primary_color || '#166534';
+
+    const isDonation = receiptData.type === 'donation';
+    const typeLabel = isDonation ? 'don' : 'adhésion';
+    const subject = isDonation
+      ? `${siteName} — Reçu de don (${receiptData.amount}€)`
+      : `${siteName} — Reçu d'adhésion`;
+
+    const html = `
+      <div style="font-family:Arial,sans-serif;background:#f9f9f9;padding:20px 0">
+        <div style="max-width:600px;margin:auto;border-radius:10px;overflow:hidden;box-shadow:0 2px 6px rgba(0,0,0,0.1);background:#fff">
+          <div style="background:${primaryColor};padding:30px 20px;text-align:center">
+            <h1 style="color:#fff;font-size:24px;margin:0">${siteName}</h1>
+            <p style="color:rgba(255,255,255,0.8);margin:5px 0 0;font-size:14px">Confirmation de ${typeLabel}</p>
+          </div>
+          <div style="padding:30px 20px">
+            <p>Bonjour${recipientName ? ' ' + recipientName : ''},</p>
+            <p>Merci pour votre ${typeLabel}${isDonation ? ` de <strong>${new Intl.NumberFormat('fr-FR', { style: 'currency', currency: receiptData.currency || 'EUR' }).format(receiptData.amount)}</strong>` : ''} ! Votre soutien est précieux pour notre association.</p>
+            ${isDonation ? `<p style="color:#666;font-size:14px">Votre don ouvre droit à une réduction d'impôt de 66% du montant versé, dans la limite de 20% du revenu imposable.</p>` : ''}
+            ${!isDonation && receiptData.startDate && receiptData.endDate ? `<p style="color:#666;font-size:14px">Votre adhésion est valide du <strong>${receiptData.startDate}</strong> au <strong>${receiptData.endDate}</strong>.</p>` : ''}
+            <div style="margin:20px 0;padding:15px;background:#f0fdf4;border-left:4px solid ${primaryColor};border-radius:4px">
+              <p style="margin:0;font-weight:bold;color:${primaryColor}">Votre reçu est en pièce jointe</p>
+              <p style="margin:5px 0 0;font-size:13px;color:#555">Conservez ce document pour votre déclaration fiscale.</p>
+            </div>
+            <p style="font-size:13px;color:#888">N° de reçu : ${receiptData.receiptNumber}</p>
+          </div>
+          <div style="background:#f5f5f5;padding:15px;text-align:center;font-size:12px;color:#999">
+            <p style="margin:0">${siteName} — merci pour votre soutien !</p>
+          </div>
+        </div>
+      </div>
+    `;
+
+    await transporter.sendMail({
+      from: `${fromName} <${fromEmail}>`,
+      to: recipientEmail,
+      subject,
+      html,
+      text: `${subject}\n\nMerci pour votre ${typeLabel}. Votre reçu (${receiptData.receiptNumber}) est joint à cet email.`,
+      attachments: [{
+        filename: `recu-${receiptData.receiptNumber}.pdf`,
+        content: pdfBuffer,
+        contentType: 'application/pdf',
+      }],
+    });
+
+    console.log(`✅ Reçu envoyé par email à ${recipientEmail} (${receiptData.receiptNumber})`);
+  } catch (err) {
+    console.error('Erreur envoi reçu par email:', err);
+  }
+}
+
+// Helper: send receipt for a completed donation
+async function sendDonationReceiptEmail(donationId: string) {
+  try {
+    const [rows] = await pool.query(
+      `SELECT d.*, u.full_name, u.email as user_email FROM donations d
+       LEFT JOIN users u ON d.user_id = u.id WHERE d.id = ?`,
+      [donationId]
+    );
+    const donation = (rows as any[])[0];
+    if (!donation || donation.status !== 'completed') return;
+
+    const [countRows] = await pool.query(
+      "SELECT COUNT(*) as cnt FROM donations WHERE created_at <= ? AND status = 'completed'",
+      [donation.created_at]
+    );
+    const index = ((countRows as any[])[0]?.cnt || 1);
+    const createdDate = new Date(donation.created_at);
+
+    const receiptData: ReceiptData = {
+      type: 'donation',
+      receiptNumber: generateReceiptNumber('DON', createdDate, index),
+      date: createdDate.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' }),
+      amount: Number(donation.amount) || 0,
+      currency: donation.currency || 'EUR',
+      userName: donation.donor_name || donation.full_name || 'Donateur',
+      userEmail: donation.donor_email || donation.user_email || '',
+      paymentMethod: 'Carte bancaire (Stripe)',
+      description: donation.is_recurring ? 'Don récurrent mensuel' : 'Don ponctuel',
+      isRecurring: !!donation.is_recurring,
+    };
+
+    const email = donation.donor_email || donation.user_email;
+    if (email) {
+      await sendReceiptEmail(email, receiptData.userName, receiptData);
+    }
+  } catch (err) {
+    console.error('Erreur envoi reçu don:', err);
+  }
+}
+
+// Helper: send receipt for an activated membership
+async function sendMembershipReceiptEmail(membershipId: string) {
+  try {
+    const [rows] = await pool.query(
+      `SELECT m.*, u.full_name, u.email as user_email FROM memberships m
+       LEFT JOIN users u ON m.user_id = u.id WHERE m.id = ?`,
+      [membershipId]
+    );
+    const membership = (rows as any[])[0];
+    if (!membership) return;
+
+    const [countRows] = await pool.query(
+      "SELECT COUNT(*) as cnt FROM memberships WHERE created_at <= ?",
+      [membership.created_at]
+    );
+    const index = ((countRows as any[])[0]?.cnt || 1);
+    const createdDate = new Date(membership.created_at);
+    const memberName = [membership.first_name, membership.last_name].filter(Boolean).join(' ') || membership.full_name || 'Adhérent';
+
+    const receiptData: ReceiptData = {
+      type: 'membership',
+      receiptNumber: generateReceiptNumber('ADH', createdDate, index),
+      date: createdDate.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' }),
+      amount: Number(membership.amount) || 0,
+      currency: 'EUR',
+      userName: memberName,
+      userEmail: membership.email || membership.user_email || '',
+      paymentMethod: 'Carte bancaire (Stripe)',
+      description: 'Adhésion annuelle',
+      membershipType: membership.membership_type || 'Standard',
+      startDate: membership.start_date ? new Date(membership.start_date).toLocaleDateString('fr-FR') : undefined,
+      endDate: membership.end_date ? new Date(membership.end_date).toLocaleDateString('fr-FR') : undefined,
+    };
+
+    const email = membership.email || membership.user_email;
+    if (email) {
+      await sendReceiptEmail(email, receiptData.userName, receiptData);
+    }
+  } catch (err) {
+    console.error('Erreur envoi reçu adhésion:', err);
+  }
 }
 
 // ─── Checkout: One-time donation ───
@@ -288,6 +479,10 @@ router.post('/session/:sessionId/confirm', authenticate, async (req, res) => {
           "UPDATE donations SET status = 'completed', stripe_payment_intent_id = ? WHERE stripe_session_id = ? AND status = 'pending'",
           [session.payment_intent || session.subscription || null, session.id]
         );
+        // Send receipt email
+        if (metadata.donation_id) {
+          sendDonationReceiptEmail(metadata.donation_id).catch(err => console.error('Receipt email error:', err));
+        }
       }
 
       // Activate membership
@@ -308,6 +503,10 @@ router.post('/session/:sessionId/confirm', authenticate, async (req, res) => {
               "INSERT INTO user_roles (id, user_id, role) VALUES (?, ?, 'member')",
               [uuid(), userId]
             );
+          }
+          // Send receipt email
+          if (metadata.membership_id) {
+            sendMembershipReceiptEmail(metadata.membership_id).catch(err => console.error('Receipt email error:', err));
           }
         }
       }
@@ -377,6 +576,10 @@ router.post('/webhook', async (req, res) => {
             [session.payment_intent || session.subscription || null, session.id]
           );
           console.log(`✅ Donation ${metadata.donation_id} completed`);
+          // Send receipt email
+          if (metadata.donation_id) {
+            sendDonationReceiptEmail(metadata.donation_id).catch(err => console.error('Receipt email error:', err));
+          }
         }
 
         if (metadata.type === 'membership') {
@@ -401,6 +604,10 @@ router.post('/webhook', async (req, res) => {
             }
           }
           console.log(`✅ Membership ${metadata.membership_id} activated`);
+          // Send receipt email
+          if (metadata.membership_id) {
+            sendMembershipReceiptEmail(metadata.membership_id).catch(err => console.error('Receipt email error:', err));
+          }
         }
         break;
       }

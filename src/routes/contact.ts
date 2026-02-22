@@ -100,7 +100,7 @@ async function sendContactEmail(
   }
 
   const fromName = settings.email_from_name || 'Site Web';
-  const fromEmail = settings.email_smtp_user; // send from the SMTP user
+  const fromEmail = settings.email_from_address || settings.email_smtp_user;
   const recipient = settings.email_contact_recipient;
 
   if (!recipient) {

@@ -162,7 +162,7 @@ router.post('/send', authenticate, requireAdmin, async (req, res) => {
     const siteUrl = await getSetting('site_url') || '';
     const primaryColor = await getSetting('primary_color') || '#166534';
     const fromName = emailSettings.email_from_name || siteName;
-    const fromEmail = emailSettings.email_smtp_user;
+    const fromEmail = emailSettings.email_from_address || emailSettings.email_smtp_user;
 
     // Build HTML
     const html = buildNewsletterHtml({

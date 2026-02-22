@@ -57,7 +57,7 @@ async function sendRegistrationConfirmation(
     if (!transporter) return;
 
     const fromName = settings.email_from_name || 'Ecolocal';
-    const fromEmail = settings.email_smtp_user;
+    const fromEmail = settings.email_from_address || settings.email_smtp_user;
     const siteName = settings.site_name || 'Ecolocal';
     const primaryColor = eventSettings.event_email_color || '#166534';
 

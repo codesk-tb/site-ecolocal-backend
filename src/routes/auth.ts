@@ -136,7 +136,7 @@ router.post('/login', async (req, res) => {
           ) as any[];
           const siteName = siteRows[0]?.setting_value || 'Site Web';
           const fromName = emailSettings.email_from_name || siteName;
-          const fromEmail = emailSettings.email_smtp_user;
+          const fromEmail = emailSettings.email_from_address || emailSettings.email_smtp_user;
 
           await transporter.sendMail({
             from: `${fromName} <${fromEmail}>`,
@@ -319,7 +319,7 @@ router.post('/resend-2fa', async (req, res) => {
         ) as any[];
         const siteName = siteRows[0]?.setting_value || 'Site Web';
         const fromName = emailSettings.email_from_name || siteName;
-        const fromEmail = emailSettings.email_smtp_user;
+        const fromEmail = emailSettings.email_from_address || emailSettings.email_smtp_user;
 
         await transporter.sendMail({
           from: `${fromName} <${fromEmail}>`,
@@ -399,7 +399,7 @@ router.put('/toggle-2fa', authenticate, async (req, res) => {
         const [siteRows] = await pool.query("SELECT setting_value FROM site_settings WHERE setting_key = 'site_name' LIMIT 1") as any[];
         const siteName = siteRows[0]?.setting_value || 'Site Web';
         const fromName = emailSettings.email_from_name || siteName;
-        const fromEmail = emailSettings.email_smtp_user;
+        const fromEmail = emailSettings.email_from_address || emailSettings.email_smtp_user;
 
         await transporter.sendMail({
           from: `${fromName} <${fromEmail}>`,
@@ -480,6 +480,9 @@ router.get('/admin-profile', authenticate, requireAdmin, async (req, res) => {
       return res.status(404).json({ error: 'Utilisateur non trouvé' });
     }
 
+    // Normalize two_factor_enabled to boolean
+    users[0].two_factor_enabled = !!(users[0].two_factor_enabled);
+
     // Get total user count and other admin stats
     const [userCount] = await pool.query('SELECT COUNT(*) as total FROM users');
     const [articleCount] = await pool.query('SELECT COUNT(*) as total FROM articles');
@@ -517,6 +520,9 @@ router.get('/me', authenticate, async (req, res) => {
       [req.user!.id, 'admin']
     );
     const isAdmin = Array.isArray(roleRows) && roleRows.length > 0;
+
+    // Normalize two_factor_enabled to boolean
+    users[0].two_factor_enabled = !!(users[0].two_factor_enabled);
 
     res.json({ user: users[0], isAdmin });
   } catch (error) {
@@ -643,7 +649,7 @@ router.post('/forgot-password', async (req, res) => {
         ) as any[];
         const siteName = siteRows[0]?.setting_value || 'Site Web';
         const fromName = emailSettings.email_from_name || siteName;
-        const fromEmail = emailSettings.email_smtp_user;
+        const fromEmail = emailSettings.email_from_address || emailSettings.email_smtp_user;
 
         await transporter.sendMail({
           from: `${fromName} <${fromEmail}>`,

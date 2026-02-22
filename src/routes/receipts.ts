@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import PDFDocument from 'pdfkit';
 import pool from '../db/connection';
 import { authenticate, requireAdmin } from '../middleware/auth';
+import { PassThrough } from 'stream';
 
 const router = Router();
 
@@ -37,30 +38,28 @@ function generateReceiptNumber(type: 'DON' | 'ADH', date: Date, index: number): 
 
 // ─── Generate PDF receipt ───
 
-function buildReceiptPDF(
-  res: Response,
-  settings: Record<string, string>,
-  data: {
-    type: 'donation' | 'membership';
-    receiptNumber: string;
-    date: string;
-    amount: number;
-    currency: string;
-    userName: string;
-    userEmail: string;
-    paymentMethod: string;
-    description: string;
-    isRecurring?: boolean;
-    membershipType?: string;
-    startDate?: string;
-    endDate?: string;
-  }
-) {
-  const doc = new PDFDocument({ size: 'A4', margin: 50 });
+export interface ReceiptData {
+  type: 'donation' | 'membership';
+  receiptNumber: string;
+  date: string;
+  amount: number;
+  currency: string;
+  userName: string;
+  userEmail: string;
+  paymentMethod: string;
+  description: string;
+  isRecurring?: boolean;
+  membershipType?: string;
+  startDate?: string;
+  endDate?: string;
+}
 
-  res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename="recu-${data.receiptNumber}.pdf"`);
-  doc.pipe(res);
+// Core: render the PDF content onto a PDFDocument (no piping)
+function renderReceiptContent(
+  doc: PDFKit.PDFDocument,
+  settings: Record<string, string>,
+  data: ReceiptData
+) {
 
   const primaryColor = hexToRGB(settings.receipt_primary_color || '#166534');
   const secondaryColor = hexToRGB(settings.receipt_secondary_color || '#15803d');
@@ -187,9 +186,35 @@ function buildReceiptPDF(
 
   // Bottom bar
   doc.rect(0, doc.page.height - 8, doc.page.width, 8).fill(primaryColor);
+}
 
+// Build PDF and pipe to HTTP response
+function buildReceiptPDF(res: Response, settings: Record<string, string>, data: ReceiptData) {
+  const doc = new PDFDocument({ size: 'A4', margin: 50 });
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="recu-${data.receiptNumber}.pdf"`);
+  doc.pipe(res);
+  renderReceiptContent(doc, settings, data);
   doc.end();
 }
+
+// Build PDF and return as Buffer (for email attachment)
+export function buildReceiptPDFBuffer(settings: Record<string, string>, data: ReceiptData): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'A4', margin: 50 });
+    const chunks: Buffer[] = [];
+    const stream = new PassThrough();
+    doc.pipe(stream);
+    stream.on('data', (chunk: Buffer) => chunks.push(chunk));
+    stream.on('end', () => resolve(Buffer.concat(chunks)));
+    stream.on('error', reject);
+    renderReceiptContent(doc, settings, data);
+    doc.end();
+  });
+}
+
+// Export helpers for use in stripe.ts
+export { getReceiptSettings, generateReceiptNumber };
 
 // ─── GET /api/receipts/settings — Get receipt template settings ───
 

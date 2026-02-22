@@ -131,11 +131,12 @@ app.listen(PORT, async () => {
     'ALTER TABLE contact_messages ADD COLUMN emailed TINYINT(1) NOT NULL DEFAULT 0',
     // Replace Resend/SendGrid with Nodemailer SMTP settings
     "UPDATE site_settings SET setting_value = 'nodemailer' WHERE setting_key = 'email_provider' AND setting_value IN ('resend', 'sendgrid')",
-    "DELETE FROM site_settings WHERE setting_key IN ('email_resend_api_key', 'email_sendgrid_api_key', 'email_from_address')",
+    "DELETE FROM site_settings WHERE setting_key IN ('email_resend_api_key', 'email_sendgrid_api_key')",
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'email_smtp_host', '', 'text', 'Serveur SMTP', 'Adresse du serveur SMTP (ex: smtp.gmail.com)', 'emails', 10)",
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'email_smtp_port', '587', 'text', 'Port SMTP', 'Port du serveur (587 pour TLS, 465 pour SSL)', 'emails', 11)",
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'email_smtp_secure', 'false', 'boolean', 'SSL/TLS', 'Utiliser SSL (true pour port 465)', 'emails', 12)",
-    "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'email_smtp_user', '', 'text', 'Utilisateur SMTP', 'Adresse email utilisée pour se connecter', 'emails', 13)",
+    "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'email_smtp_user', '', 'text', 'Utilisateur SMTP', 'Nom d\'utilisateur SMTP (ex: resend)', 'emails', 13)",
+    "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'email_from_address', '', 'text', 'Email expéditeur', 'Adresse email utilisée comme expéditeur (ex: test@devnotifs.com)', 'emails', 15)",
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'email_smtp_pass', '', 'secret', 'Mot de passe SMTP', 'Mot de passe ou mot de passe d\\'application', 'emails', 14)",
     // Update labels for email settings
     "UPDATE site_settings SET label = 'Fournisseur d\\'email', description = 'Nodemailer (SMTP) pour envoyer par email, ou Aucun pour consulter sur le site' WHERE setting_key = 'email_provider'",
@@ -176,8 +177,6 @@ app.listen(PORT, async () => {
     )`,
     // Add 2fa_enabled column to users (default OFF — user must opt in)
     'ALTER TABLE users ADD COLUMN two_factor_enabled TINYINT(1) NOT NULL DEFAULT 0',
-    // Fix: reset any users that had 2FA on by default
-    'UPDATE users SET two_factor_enabled = 0 WHERE two_factor_enabled = 1',
     // Event confirmation email settings
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'event_email_enabled', 'true', 'boolean', 'Email inscription événement', 'Envoyer un email de confirmation lors de l\\'inscription à un événement', 'events', 1)",
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'event_email_subject', 'Inscription confirmée — {{EVENT}}', 'text', 'Sujet de l\\'email', 'Sujet du mail. Utilisez {{EVENT}} pour le nom de l\\'événement', 'events', 2)",
