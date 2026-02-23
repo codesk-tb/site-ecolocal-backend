@@ -162,6 +162,10 @@ app.listen(PORT, async () => {
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'fb_page_access_token', '', 'secret', 'Token d\\'accès Page Facebook', 'Token longue durée de la page Facebook (voir aide ci-dessous)', 'automation', 10)",
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'fb_page_id', '', 'text', 'ID de la Page Facebook', 'Identifiant numérique de votre page Facebook', 'automation', 11)",
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'ig_business_account_id', '', 'text', 'ID du compte Instagram Business', 'Identifiant du compte Instagram lié à la page Facebook', 'automation', 12)",
+    // Favicon setting
+    "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'site_favicon_url', '', 'image', 'Favicon du site', 'Icône affichée dans l\\'onglet du navigateur (.ico, .png, .svg)', 'branding', 5)",
+    // Auth background image setting
+    "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'auth_background_image', '', 'image', 'Image de fond (connexion / inscription)', 'Image affichée sur les pages de connexion, inscription et vérification', 'branding', 10)",
     // Stripe checkout branding
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'checkout_background_image', '', 'text', 'Image de fond Checkout', 'URL d\\'une image de fond affichée dans la page de paiement Stripe', 'payments', 30)",
     // 2FA settings
@@ -215,6 +219,9 @@ app.listen(PORT, async () => {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )`,
+    // Add attempts column to two_factor_codes and password_resets for brute-force protection
+    'ALTER TABLE two_factor_codes ADD COLUMN attempts INT NOT NULL DEFAULT 0',
+    'ALTER TABLE password_resets ADD COLUMN attempts INT NOT NULL DEFAULT 0',
   ];
 
   for (const sql of migrations) {

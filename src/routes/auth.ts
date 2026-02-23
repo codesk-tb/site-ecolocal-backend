@@ -29,6 +29,9 @@ function generateResetCode(): string {
 const PASSWORD_REGEX = /^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
 const PASSWORD_ERROR = 'Le mot de passe doit contenir au moins 8 caractères, une majuscule, un chiffre et un caractère spécial';
 
+// Max verification code attempts before invalidation
+const MAX_CODE_ATTEMPTS = 3;
+
 // POST /api/auth/register
 router.post('/register', async (req, res) => {
   try {
@@ -232,9 +235,21 @@ router.post('/verify-2fa', async (req, res) => {
       return res.status(400).json({ error: 'Code expiré. Veuillez vous reconnecter.' });
     }
 
+    // Check max attempts
+    if ((codes[0].attempts || 0) >= MAX_CODE_ATTEMPTS) {
+      await pool.query('DELETE FROM two_factor_codes WHERE user_id = ?', [user.id]);
+      return res.status(429).json({ error: 'Trop de tentatives. Veuillez vous reconnecter pour recevoir un nouveau code.' });
+    }
+
     const valid = await bcrypt.compare(code, codes[0].code_hash);
     if (!valid) {
-      return res.status(400).json({ error: 'Code incorrect' });
+      await pool.query('UPDATE two_factor_codes SET attempts = attempts + 1 WHERE id = ?', [codes[0].id]);
+      const remaining = MAX_CODE_ATTEMPTS - (codes[0].attempts || 0) - 1;
+      if (remaining <= 0) {
+        await pool.query('DELETE FROM two_factor_codes WHERE user_id = ?', [user.id]);
+        return res.status(429).json({ error: 'Trop de tentatives. Veuillez vous reconnecter pour recevoir un nouveau code.' });
+      }
+      return res.status(400).json({ error: `Code incorrect. ${remaining} tentative(s) restante(s).` });
     }
 
     // Cleanup used code
@@ -452,9 +467,21 @@ router.post('/confirm-2fa-setup', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Code expiré. Veuillez réessayer.' });
     }
 
+    // Check max attempts
+    if ((codes[0].attempts || 0) >= MAX_CODE_ATTEMPTS) {
+      await pool.query('DELETE FROM two_factor_codes WHERE user_id = ?', [userId]);
+      return res.status(429).json({ error: 'Trop de tentatives. Veuillez redemander un code.' });
+    }
+
     const valid = await bcrypt.compare(code, codes[0].code_hash);
     if (!valid) {
-      return res.status(400).json({ error: 'Code incorrect' });
+      await pool.query('UPDATE two_factor_codes SET attempts = attempts + 1 WHERE id = ?', [codes[0].id]);
+      const remaining = MAX_CODE_ATTEMPTS - (codes[0].attempts || 0) - 1;
+      if (remaining <= 0) {
+        await pool.query('DELETE FROM two_factor_codes WHERE user_id = ?', [userId]);
+        return res.status(429).json({ error: 'Trop de tentatives. Veuillez redemander un code.' });
+      }
+      return res.status(400).json({ error: `Code incorrect. ${remaining} tentative(s) restante(s).` });
     }
 
     // Code is valid — enable 2FA
@@ -704,9 +731,21 @@ router.post('/verify-reset-code', async (req, res) => {
       return res.status(400).json({ error: 'Code invalide ou expiré' });
     }
 
+    // Check max attempts
+    if ((resets[0].attempts || 0) >= MAX_CODE_ATTEMPTS) {
+      await pool.query('DELETE FROM password_resets WHERE id = ?', [resets[0].id]);
+      return res.status(429).json({ error: 'Trop de tentatives. Veuillez redemander un code de réinitialisation.' });
+    }
+
     const valid = await bcrypt.compare(code, resets[0].code_hash);
     if (!valid) {
-      return res.status(400).json({ error: 'Code incorrect' });
+      await pool.query('UPDATE password_resets SET attempts = attempts + 1 WHERE id = ?', [resets[0].id]);
+      const remaining = MAX_CODE_ATTEMPTS - (resets[0].attempts || 0) - 1;
+      if (remaining <= 0) {
+        await pool.query('DELETE FROM password_resets WHERE id = ?', [resets[0].id]);
+        return res.status(429).json({ error: 'Trop de tentatives. Veuillez redemander un code de réinitialisation.' });
+      }
+      return res.status(400).json({ error: `Code incorrect. ${remaining} tentative(s) restante(s).` });
     }
 
     // Generate a temporary token for the password reset step
