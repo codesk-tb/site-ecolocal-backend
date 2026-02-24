@@ -1,0 +1,28 @@
+version: '3.4'
+services:
+  ecolocal-back-preprod:
+    image:  registryovh2.jtsolution.org/ecolocal-back-preprod:latest
+    # ports:
+    #   - '3001:3000'
+    deploy:
+      labels:
+       - "traefik.http.routers.ecolocal-back-preprod.rule=Host(`ecolocalback.codesk.fr`)"
+       - "traefik.enable=true"
+       - "traefik.http.routers.ecolocal-back-preprod.priority=50"
+       - "traefik.docker.network=public"
+       - "traefik.http.routers.ecolocal-back-preprod.tls.certresolver=let"
+       - "traefik.http.routers.ecolocal-back-preprod.entrypoints=websecure"
+       - "traefik.http.services.ecolocal-back-preprod.loadbalancer.server.port=3000"
+       - "traefik.http.routers.ecolocal-back-preprod-insecure.entrypoints=web"
+       - "traefik.http.routers.ecolocal-back-preprod-insecure.rule=Host(`ecolocalback.codesk.fr`)"
+      replicas: 1
+      update_config:
+        parallelism: 1
+        order: start-first
+        failure_action: rollback
+        delay: 10s
+    networks:
+      - public
+networks:
+    public:
+       external: true
