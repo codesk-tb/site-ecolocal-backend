@@ -19,7 +19,7 @@ ENV DB_NAME=ecolocal
 
 ENV JWT_SECRET=EcolocalSecretKeyJWT
 ENV JWT_EXPIRES_IN=7d
-
+ENV ENCRYPTION_KEY=Ecolocalsecretkey
 ENV FRONTEND_URL=https://ecolocal.codesk.fr
 
 ENV UPLOAD_DIR=./uploads
