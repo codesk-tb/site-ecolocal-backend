@@ -2,6 +2,7 @@ import { Router } from 'express';
 import nodemailer from 'nodemailer';
 import pool from '../db/connection';
 import { authenticate, requireAdmin } from '../middleware/auth';
+import { decryptSettings } from '../utils/crypto';
 
 const router = Router();
 
@@ -15,7 +16,7 @@ async function getEmailSettings(): Promise<Record<string, string>> {
   for (const row of rows as any[]) {
     settings[row.setting_key] = row.setting_value || '';
   }
-  return settings;
+  return decryptSettings(settings);
 }
 
 // ─── Helper: get site name for email template ───
@@ -99,7 +100,7 @@ async function sendContactEmail(
   }
 
   const fromName = settings.email_from_name || 'Site Web';
-  const fromEmail = settings.email_smtp_user; // send from the SMTP user
+  const fromEmail = settings.email_from_address || settings.email_smtp_user;
   const recipient = settings.email_contact_recipient;
 
   if (!recipient) {

@@ -3,13 +3,34 @@ import bcrypt from 'bcryptjs';
 import nodemailer from 'nodemailer';
 import { v4 as uuidv4 } from 'uuid';
 import pool from '../db/connection';
-import { authenticate, generateToken, optionalAuth } from '../middleware/auth';
+import { authenticate, generateToken, optionalAuth, requireAdmin } from '../middleware/auth';
+import { decryptSettings } from '../utils/crypto';
 
 const router = Router();
+
+// ─── Helpers ──────────────────────────────────────────────────
+
+async function getEmailSettings(): Promise<Record<string, string>> {
+  const [rows] = await pool.query(
+    "SELECT setting_key, setting_value FROM site_settings WHERE category = 'emails'"
+  );
+  const settings: Record<string, string> = {};
+  for (const row of rows as any[]) {
+    settings[row.setting_key] = row.setting_value || '';
+  }
+  return decryptSettings(settings);
+}
+
+function generateResetCode(): string {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
 
 // Password strength validation
 const PASSWORD_REGEX = /^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
 const PASSWORD_ERROR = 'Le mot de passe doit contenir au moins 8 caractères, une majuscule, un chiffre et un caractère spécial';
+
+// Max verification code attempts before invalidation
+const MAX_CODE_ATTEMPTS = 3;
 
 // POST /api/auth/register
 router.post('/register', async (req, res) => {
@@ -83,6 +104,78 @@ router.post('/login', async (req, res) => {
     );
     const isAdmin = Array.isArray(roleRows) && roleRows.length > 0;
 
+    // 2FA check 
+    if (user.two_factor_enabled === 1) {
+      // Generate and send 2FA code
+      const code = Math.floor(100000 + Math.random() * 900000).toString();
+      const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+      // Delete any existing codes for this user
+      await pool.query('DELETE FROM two_factor_codes WHERE user_id = ?', [user.id]);
+
+      const codeHash = await bcrypt.hash(code, 10);
+      await pool.query(
+        'INSERT INTO two_factor_codes (id, user_id, code_hash, expires_at) VALUES (?, ?, ?, ?)',
+        [uuidv4(), user.id, codeHash, expiresAt]
+      );
+
+      // Try to send email
+      const emailSettings = await getEmailSettings();
+      if (emailSettings.email_provider === 'nodemailer' && emailSettings.email_smtp_host) {
+        try {
+          const transporter = nodemailer.createTransport({
+            host: emailSettings.email_smtp_host,
+            port: parseInt(emailSettings.email_smtp_port || '587'),
+            secure: emailSettings.email_smtp_secure === 'true',
+            auth: {
+              user: emailSettings.email_smtp_user,
+              pass: emailSettings.email_smtp_pass,
+            },
+            tls: { rejectUnauthorized: false },
+          });
+
+          const [siteRows] = await pool.query(
+            "SELECT setting_value FROM site_settings WHERE setting_key = 'site_name' LIMIT 1"
+          ) as any[];
+          const siteName = siteRows[0]?.setting_value || 'Site Web';
+          const fromName = emailSettings.email_from_name || siteName;
+          const fromEmail = emailSettings.email_from_address || emailSettings.email_smtp_user;
+
+          await transporter.sendMail({
+            from: `${fromName} <${fromEmail}>`,
+            to: user.email,
+            subject: `${siteName} — Code de vérification`,
+            html: `
+              <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:20px">
+                <h2 style="color:#333;text-align:center">${siteName}</h2>
+                <p>Bonjour${user.first_name ? ' ' + user.first_name : ''},</p>
+                <p>Voici votre code de vérification pour vous connecter :</p>
+                <div style="text-align:center;margin:30px 0">
+                  <span style="font-size:32px;font-weight:bold;letter-spacing:8px;background:#f3f4f6;padding:16px 32px;border-radius:8px;display:inline-block">${code}</span>
+                </div>
+                <p style="color:#666;font-size:14px">Ce code est valable <strong>10 minutes</strong>. Si vous n'avez pas demandé cette connexion, ignorez cet email.</p>
+                <hr style="border:none;border-top:1px solid #eee;margin:24px 0">
+                <p style="color:#999;font-size:12px;text-align:center">${siteName}</p>
+              </div>
+            `,
+            text: `Votre code de vérification : ${code}\n\nCe code est valable 10 minutes.`,
+          });
+        } catch (emailErr) {
+          console.error('Error sending 2FA email:', emailErr);
+        }
+      } else {
+        console.log(`[2FA Code] ${email}: ${code}`);
+      }
+
+      // Return requires2FA without logging in
+      return res.json({
+        requires2FA: true,
+        email: user.email,
+        message: 'Un code de vérification a été envoyé à votre adresse email.',
+      });
+    }
+
+    //  No 2FA normal login 
     const token = generateToken({ id: user.id, email: user.email });
     
     res.cookie('token', token, {
@@ -118,11 +211,329 @@ router.post('/logout', (_req, res) => {
   res.json({ message: 'Déconnecté' });
 });
 
+// POST /api/auth/verify-2fa
+router.post('/verify-2fa', async (req, res) => {
+  try {
+    const { email, code } = req.body;
+    if (!email || !code) return res.status(400).json({ error: 'Email et code requis' });
+
+    const [rows] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
+    const users = rows as any[];
+    if (users.length === 0) {
+      return res.status(401).json({ error: 'Utilisateur non trouvé' });
+    }
+    const user = users[0];
+
+    // Find valid 2FA code
+    const [codeRows] = await pool.query(
+      'SELECT * FROM two_factor_codes WHERE user_id = ? AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1',
+      [user.id]
+    );
+    const codes = codeRows as any[];
+
+    if (codes.length === 0) {
+      return res.status(400).json({ error: 'Code expiré. Veuillez vous reconnecter.' });
+    }
+
+    // Check max attempts
+    if ((codes[0].attempts || 0) >= MAX_CODE_ATTEMPTS) {
+      await pool.query('DELETE FROM two_factor_codes WHERE user_id = ?', [user.id]);
+      return res.status(429).json({ error: 'Trop de tentatives. Veuillez vous reconnecter pour recevoir un nouveau code.' });
+    }
+
+    const valid = await bcrypt.compare(code, codes[0].code_hash);
+    if (!valid) {
+      await pool.query('UPDATE two_factor_codes SET attempts = attempts + 1 WHERE id = ?', [codes[0].id]);
+      const remaining = MAX_CODE_ATTEMPTS - (codes[0].attempts || 0) - 1;
+      if (remaining <= 0) {
+        await pool.query('DELETE FROM two_factor_codes WHERE user_id = ?', [user.id]);
+        return res.status(429).json({ error: 'Trop de tentatives. Veuillez vous reconnecter pour recevoir un nouveau code.' });
+      }
+      return res.status(400).json({ error: `Code incorrect. ${remaining} tentative(s) restante(s).` });
+    }
+
+    // Cleanup used code
+    await pool.query('DELETE FROM two_factor_codes WHERE user_id = ?', [user.id]);
+
+    // Check admin role
+    const [roleRows] = await pool.query(
+      'SELECT role FROM user_roles WHERE user_id = ? AND role = ?',
+      [user.id, 'admin']
+    );
+    const isAdmin = Array.isArray(roleRows) && roleRows.length > 0;
+
+    const token = generateToken({ id: user.id, email: user.email });
+
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+
+    res.json({
+      user: {
+        id: user.id,
+        email: user.email,
+        full_name: user.full_name,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        phone: user.phone,
+        avatar_url: user.avatar_url,
+        created_at: user.created_at,
+      },
+      isAdmin,
+      token,
+    });
+  } catch (error) {
+    console.error('Verify 2FA error:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// POST /api/auth/resend-2fa — resend 2FA code
+router.post('/resend-2fa', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email requis' });
+
+    const [rows] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
+    const users = rows as any[];
+    if (users.length === 0) {
+      return res.json({ message: 'Code envoyé.' }); // Don't reveal user existence
+    }
+    const user = users[0];
+
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    await pool.query('DELETE FROM two_factor_codes WHERE user_id = ?', [user.id]);
+
+    const codeHash = await bcrypt.hash(code, 10);
+    await pool.query(
+      'INSERT INTO two_factor_codes (id, user_id, code_hash, expires_at) VALUES (?, ?, ?, ?)',
+      [uuidv4(), user.id, codeHash, expiresAt]
+    );
+
+    const emailSettings = await getEmailSettings();
+    if (emailSettings.email_provider === 'nodemailer' && emailSettings.email_smtp_host) {
+      try {
+        const transporter = nodemailer.createTransport({
+          host: emailSettings.email_smtp_host,
+          port: parseInt(emailSettings.email_smtp_port || '587'),
+          secure: emailSettings.email_smtp_secure === 'true',
+          auth: {
+            user: emailSettings.email_smtp_user,
+            pass: emailSettings.email_smtp_pass,
+          },
+          tls: { rejectUnauthorized: false },
+        });
+
+        const [siteRows] = await pool.query(
+          "SELECT setting_value FROM site_settings WHERE setting_key = 'site_name' LIMIT 1"
+        ) as any[];
+        const siteName = siteRows[0]?.setting_value || 'Site Web';
+        const fromName = emailSettings.email_from_name || siteName;
+        const fromEmail = emailSettings.email_from_address || emailSettings.email_smtp_user;
+
+        await transporter.sendMail({
+          from: `${fromName} <${fromEmail}>`,
+          to: user.email,
+          subject: `${siteName} — Nouveau code de vérification`,
+          html: `
+            <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:20px">
+              <h2 style="color:#333;text-align:center">${siteName}</h2>
+              <p>Bonjour${user.first_name ? ' ' + user.first_name : ''},</p>
+              <p>Voici votre nouveau code de vérification :</p>
+              <div style="text-align:center;margin:30px 0">
+                <span style="font-size:32px;font-weight:bold;letter-spacing:8px;background:#f3f4f6;padding:16px 32px;border-radius:8px;display:inline-block">${code}</span>
+              </div>
+              <p style="color:#666;font-size:14px">Ce code est valable <strong>10 minutes</strong>.</p>
+              <hr style="border:none;border-top:1px solid #eee;margin:24px 0">
+              <p style="color:#999;font-size:12px;text-align:center">${siteName}</p>
+            </div>
+          `,
+          text: `Votre code de vérification : ${code}\n\nCe code est valable 10 minutes.`,
+        });
+      } catch (emailErr) {
+        console.error('Error sending 2FA email:', emailErr);
+      }
+    } else {
+      console.log(`[2FA Code Resend] ${email}: ${code}`);
+    }
+
+    res.json({ message: 'Un nouveau code a été envoyé.' });
+  } catch (error) {
+    console.error('Resend 2FA error:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// PUT /api/auth/toggle-2fa — request 2FA activation (sends code) or disable
+router.put('/toggle-2fa', authenticate, async (req, res) => {
+  try {
+    const { enabled } = req.body;
+
+    // ─── Disabling 2FA — instant ──────────────────────────────
+    if (!enabled) {
+      await pool.query('UPDATE users SET two_factor_enabled = 0 WHERE id = ?', [req.user!.id]);
+      return res.json({ message: '2FA désactivée' });
+    }
+
+    // ─── Enabling 2FA — send confirmation code first ─────────
+    const [rows] = await pool.query('SELECT * FROM users WHERE id = ?', [req.user!.id]);
+    const user = (rows as any[])[0];
+    if (!user) return res.status(404).json({ error: 'Utilisateur non trouvé' });
+
+    // If already enabled, nothing to do
+    if (user.two_factor_enabled === 1) {
+      return res.json({ message: '2FA déjà activée' });
+    }
+
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    await pool.query('DELETE FROM two_factor_codes WHERE user_id = ?', [user.id]);
+    const codeHash = await bcrypt.hash(code, 10);
+    await pool.query(
+      'INSERT INTO two_factor_codes (id, user_id, code_hash, expires_at) VALUES (?, ?, ?, ?)',
+      [uuidv4(), user.id, codeHash, expiresAt]
+    );
+
+    // Send email
+    const emailSettings = await getEmailSettings();
+    if (emailSettings.email_provider === 'nodemailer' && emailSettings.email_smtp_host) {
+      try {
+        const transporter = nodemailer.createTransport({
+          host: emailSettings.email_smtp_host,
+          port: parseInt(emailSettings.email_smtp_port || '587'),
+          secure: emailSettings.email_smtp_secure === 'true',
+          auth: { user: emailSettings.email_smtp_user, pass: emailSettings.email_smtp_pass },
+          tls: { rejectUnauthorized: false },
+        });
+        const [siteRows] = await pool.query("SELECT setting_value FROM site_settings WHERE setting_key = 'site_name' LIMIT 1") as any[];
+        const siteName = siteRows[0]?.setting_value || 'Site Web';
+        const fromName = emailSettings.email_from_name || siteName;
+        const fromEmail = emailSettings.email_from_address || emailSettings.email_smtp_user;
+
+        await transporter.sendMail({
+          from: `${fromName} <${fromEmail}>`,
+          to: user.email,
+          subject: `${siteName} — Activation de la double authentification`,
+          html: `
+            <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:20px">
+              <h2 style="color:#333;text-align:center">${siteName}</h2>
+              <p>Bonjour${user.first_name ? ' ' + user.first_name : ''},</p>
+              <p>Vous avez demandé l'activation de la double authentification. Voici votre code de confirmation :</p>
+              <div style="text-align:center;margin:30px 0">
+                <span style="font-size:32px;font-weight:bold;letter-spacing:8px;background:#f3f4f6;padding:16px 32px;border-radius:8px;display:inline-block">${code}</span>
+              </div>
+              <p style="color:#666;font-size:14px">Ce code est valable <strong>10 minutes</strong>. Si vous n'avez pas fait cette demande, ignorez cet email.</p>
+              <hr style="border:none;border-top:1px solid #eee;margin:24px 0">
+              <p style="color:#999;font-size:12px;text-align:center">${siteName}</p>
+            </div>
+          `,
+          text: `Code d'activation 2FA : ${code}\n\nCe code est valable 10 minutes.`,
+        });
+      } catch (emailErr) {
+        console.error('Error sending 2FA setup email:', emailErr);
+      }
+    } else {
+      console.log(`[2FA Setup Code] ${user.email}: ${code}`);
+    }
+
+    res.json({ codeSent: true, message: 'Un code de confirmation a été envoyé à votre adresse email.' });
+  } catch (error) {
+    console.error('Toggle 2FA error:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// POST /api/auth/confirm-2fa-setup — confirm 2FA activation with code
+router.post('/confirm-2fa-setup', authenticate, async (req, res) => {
+  try {
+    const { code } = req.body;
+    if (!code) return res.status(400).json({ error: 'Code requis' });
+
+    const userId = req.user!.id;
+
+    const [codeRows] = await pool.query(
+      'SELECT * FROM two_factor_codes WHERE user_id = ? AND expires_at > NOW() ORDER BY created_at DESC LIMIT 1',
+      [userId]
+    );
+    const codes = codeRows as any[];
+
+    if (codes.length === 0) {
+      return res.status(400).json({ error: 'Code expiré. Veuillez réessayer.' });
+    }
+
+    // Check max attempts
+    if ((codes[0].attempts || 0) >= MAX_CODE_ATTEMPTS) {
+      await pool.query('DELETE FROM two_factor_codes WHERE user_id = ?', [userId]);
+      return res.status(429).json({ error: 'Trop de tentatives. Veuillez redemander un code.' });
+    }
+
+    const valid = await bcrypt.compare(code, codes[0].code_hash);
+    if (!valid) {
+      await pool.query('UPDATE two_factor_codes SET attempts = attempts + 1 WHERE id = ?', [codes[0].id]);
+      const remaining = MAX_CODE_ATTEMPTS - (codes[0].attempts || 0) - 1;
+      if (remaining <= 0) {
+        await pool.query('DELETE FROM two_factor_codes WHERE user_id = ?', [userId]);
+        return res.status(429).json({ error: 'Trop de tentatives. Veuillez redemander un code.' });
+      }
+      return res.status(400).json({ error: `Code incorrect. ${remaining} tentative(s) restante(s).` });
+    }
+
+    // Code is valid — enable 2FA
+    await pool.query('UPDATE users SET two_factor_enabled = 1 WHERE id = ?', [userId]);
+    await pool.query('DELETE FROM two_factor_codes WHERE user_id = ?', [userId]);
+
+    res.json({ message: '2FA activée avec succès' });
+  } catch (error) {
+    console.error('Confirm 2FA setup error:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// GET /api/auth/admin-profile — get admin's full profile
+router.get('/admin-profile', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      'SELECT id, email, full_name, first_name, last_name, phone, avatar_url, created_at, two_factor_enabled FROM users WHERE id = ?',
+      [req.user!.id]
+    );
+    const users = rows as any[];
+    if (users.length === 0) {
+      return res.status(404).json({ error: 'Utilisateur non trouvé' });
+    }
+
+    // Normalize two_factor_enabled to boolean
+    users[0].two_factor_enabled = !!(users[0].two_factor_enabled);
+
+    // Get total user count and other admin stats
+    const [userCount] = await pool.query('SELECT COUNT(*) as total FROM users');
+    const [articleCount] = await pool.query('SELECT COUNT(*) as total FROM articles');
+    const [donationCount] = await pool.query('SELECT COUNT(*) as total FROM donations WHERE status = ?', ['completed']);
+
+    res.json({
+      admin: users[0],
+      stats: {
+        totalUsers: (userCount as any[])[0]?.total || 0,
+        totalArticles: (articleCount as any[])[0]?.total || 0,
+        totalDonations: (donationCount as any[])[0]?.total || 0,
+      },
+    });
+  } catch (error) {
+    console.error('Get admin profile error:', error);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
 // GET /api/auth/me
 router.get('/me', authenticate, async (req, res) => {
   try {
     const [rows] = await pool.query(
-      'SELECT id, email, full_name, first_name, last_name, phone, avatar_url, created_at FROM users WHERE id = ?',
+      'SELECT id, email, full_name, first_name, last_name, phone, avatar_url, created_at, two_factor_enabled FROM users WHERE id = ?',
       [req.user!.id]
     );
     const users = rows as any[];
@@ -136,6 +547,9 @@ router.get('/me', authenticate, async (req, res) => {
       [req.user!.id, 'admin']
     );
     const isAdmin = Array.isArray(roleRows) && roleRows.length > 0;
+
+    // Normalize two_factor_enabled to boolean
+    users[0].two_factor_enabled = !!(users[0].two_factor_enabled);
 
     res.json({ user: users[0], isAdmin });
   } catch (error) {
@@ -213,21 +627,6 @@ router.put('/update-email', authenticate, async (req, res) => {
 
 // ─── Forgot / Reset Password ──────────────────────────────────
 
-async function getEmailSettings(): Promise<Record<string, string>> {
-  const [rows] = await pool.query(
-    "SELECT setting_key, setting_value FROM site_settings WHERE category = 'emails'"
-  );
-  const settings: Record<string, string> = {};
-  for (const row of rows as any[]) {
-    settings[row.setting_key] = row.setting_value || '';
-  }
-  return settings;
-}
-
-function generateResetCode(): string {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-}
-
 // POST /api/auth/forgot-password
 router.post('/forgot-password', async (req, res) => {
   try {
@@ -277,7 +676,7 @@ router.post('/forgot-password', async (req, res) => {
         ) as any[];
         const siteName = siteRows[0]?.setting_value || 'Site Web';
         const fromName = emailSettings.email_from_name || siteName;
-        const fromEmail = emailSettings.email_smtp_user;
+        const fromEmail = emailSettings.email_from_address || emailSettings.email_smtp_user;
 
         await transporter.sendMail({
           from: `${fromName} <${fromEmail}>`,
@@ -332,9 +731,21 @@ router.post('/verify-reset-code', async (req, res) => {
       return res.status(400).json({ error: 'Code invalide ou expiré' });
     }
 
+    // Check max attempts
+    if ((resets[0].attempts || 0) >= MAX_CODE_ATTEMPTS) {
+      await pool.query('DELETE FROM password_resets WHERE id = ?', [resets[0].id]);
+      return res.status(429).json({ error: 'Trop de tentatives. Veuillez redemander un code de réinitialisation.' });
+    }
+
     const valid = await bcrypt.compare(code, resets[0].code_hash);
     if (!valid) {
-      return res.status(400).json({ error: 'Code incorrect' });
+      await pool.query('UPDATE password_resets SET attempts = attempts + 1 WHERE id = ?', [resets[0].id]);
+      const remaining = MAX_CODE_ATTEMPTS - (resets[0].attempts || 0) - 1;
+      if (remaining <= 0) {
+        await pool.query('DELETE FROM password_resets WHERE id = ?', [resets[0].id]);
+        return res.status(429).json({ error: 'Trop de tentatives. Veuillez redemander un code de réinitialisation.' });
+      }
+      return res.status(400).json({ error: `Code incorrect. ${remaining} tentative(s) restante(s).` });
     }
 
     // Generate a temporary token for the password reset step

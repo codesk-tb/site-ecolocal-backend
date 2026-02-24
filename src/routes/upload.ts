@@ -34,6 +34,7 @@ const upload = multer({
   fileFilter: (_req, file, cb) => {
     const allowedTypes = [
       'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml',
+      'image/x-icon', 'image/vnd.microsoft.icon',
       'application/pdf', 'application/msword',
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     ];

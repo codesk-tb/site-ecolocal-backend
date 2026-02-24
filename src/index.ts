@@ -1,10 +1,12 @@
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
 import path from 'path';
 import { rateLimit } from 'express-rate-limit';
 import pool from './db/connection';
+import { isSecretKey, encrypt } from './utils/crypto';
 
 // Routes
 import authRoutes from './routes/auth';
@@ -43,7 +45,22 @@ const limiter = rateLimit({
   legacyHeaders: false,
 });
 
+app.use(helmet());
 app.use(limiter);
+
+// Strict rate limit on authentication routes (login, register, 2FA)
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 20, // max 20 attempts per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Trop de tentatives. Veuillez réessayer dans 15 minutes.' },
+});
+app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/register', authLimiter);
+app.use('/api/auth/verify-2fa', authLimiter);
+app.use('/api/auth/forgot-password', authLimiter);
+
 app.use(cors({
   origin: process.env.FRONTEND_URL || 'http://localhost:3000',
   credentials: true,
@@ -114,11 +131,12 @@ app.listen(PORT, async () => {
     'ALTER TABLE contact_messages ADD COLUMN emailed TINYINT(1) NOT NULL DEFAULT 0',
     // Replace Resend/SendGrid with Nodemailer SMTP settings
     "UPDATE site_settings SET setting_value = 'nodemailer' WHERE setting_key = 'email_provider' AND setting_value IN ('resend', 'sendgrid')",
-    "DELETE FROM site_settings WHERE setting_key IN ('email_resend_api_key', 'email_sendgrid_api_key', 'email_from_address')",
+    "DELETE FROM site_settings WHERE setting_key IN ('email_resend_api_key', 'email_sendgrid_api_key')",
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'email_smtp_host', '', 'text', 'Serveur SMTP', 'Adresse du serveur SMTP (ex: smtp.gmail.com)', 'emails', 10)",
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'email_smtp_port', '587', 'text', 'Port SMTP', 'Port du serveur (587 pour TLS, 465 pour SSL)', 'emails', 11)",
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'email_smtp_secure', 'false', 'boolean', 'SSL/TLS', 'Utiliser SSL (true pour port 465)', 'emails', 12)",
-    "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'email_smtp_user', '', 'text', 'Utilisateur SMTP', 'Adresse email utilisée pour se connecter', 'emails', 13)",
+    "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'email_smtp_user', '', 'text', 'Utilisateur SMTP', 'Nom d\'utilisateur SMTP (ex: resend)', 'emails', 13)",
+    "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'email_from_address', '', 'text', 'Email expéditeur', 'Adresse email utilisée comme expéditeur (ex: test@devnotifs.com)', 'emails', 15)",
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'email_smtp_pass', '', 'secret', 'Mot de passe SMTP', 'Mot de passe ou mot de passe d\\'application', 'emails', 14)",
     // Update labels for email settings
     "UPDATE site_settings SET label = 'Fournisseur d\\'email', description = 'Nodemailer (SMTP) pour envoyer par email, ou Aucun pour consulter sur le site' WHERE setting_key = 'email_provider'",
@@ -144,8 +162,25 @@ app.listen(PORT, async () => {
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'fb_page_access_token', '', 'secret', 'Token d\\'accès Page Facebook', 'Token longue durée de la page Facebook (voir aide ci-dessous)', 'automation', 10)",
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'fb_page_id', '', 'text', 'ID de la Page Facebook', 'Identifiant numérique de votre page Facebook', 'automation', 11)",
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'ig_business_account_id', '', 'text', 'ID du compte Instagram Business', 'Identifiant du compte Instagram lié à la page Facebook', 'automation', 12)",
+    // Favicon setting
+    "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'site_favicon_url', '', 'image', 'Favicon du site', 'Icône affichée dans l\\'onglet du navigateur (.ico, .png, .svg)', 'branding', 5)",
+    // Auth background image setting
+    "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'auth_background_image', '', 'image', 'Image de fond (connexion / inscription)', 'Image affichée sur les pages de connexion, inscription et vérification', 'branding', 10)",
     // Stripe checkout branding
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'checkout_background_image', '', 'text', 'Image de fond Checkout', 'URL d\\'une image de fond affichée dans la page de paiement Stripe', 'payments', 30)",
+    // 2FA settings
+    "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), '2fa_enabled', 'false', 'boolean', 'Authentification à deux facteurs', 'Activer la vérification par code email lors de la connexion', 'auth', 60)",
+    // 2FA codes table
+    `CREATE TABLE IF NOT EXISTS two_factor_codes (
+      id VARCHAR(36) PRIMARY KEY,
+      user_id VARCHAR(36) NOT NULL,
+      code_hash VARCHAR(255) NOT NULL,
+      expires_at TIMESTAMP NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )`,
+    // Add 2fa_enabled column to users (default OFF — user must opt in)
+    'ALTER TABLE users ADD COLUMN two_factor_enabled TINYINT(1) NOT NULL DEFAULT 0',
     // Event confirmation email settings
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'event_email_enabled', 'true', 'boolean', 'Email inscription événement', 'Envoyer un email de confirmation lors de l\\'inscription à un événement', 'events', 1)",
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'event_email_subject', 'Inscription confirmée — {{EVENT}}', 'text', 'Sujet de l\\'email', 'Sujet du mail. Utilisez {{EVENT}} pour le nom de l\\'événement', 'events', 2)",
@@ -184,10 +219,27 @@ app.listen(PORT, async () => {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )`,
+    // Add attempts column to two_factor_codes and password_resets for brute-force protection
+    'ALTER TABLE two_factor_codes ADD COLUMN attempts INT NOT NULL DEFAULT 0',
+    'ALTER TABLE password_resets ADD COLUMN attempts INT NOT NULL DEFAULT 0',
   ];
 
   for (const sql of migrations) {
     try { await pool.query(sql); } catch (_) { /* column/row already exists */ }
+  }
+
+  // ─── Encrypt any plaintext secrets still in site_settings ───
+  try {
+    const [secretRows] = await pool.query('SELECT setting_key, setting_value FROM site_settings') as any[];
+    for (const row of secretRows) {
+      if (isSecretKey(row.setting_key) && row.setting_value && !row.setting_value.startsWith('enc:')) {
+        const encrypted = encrypt(row.setting_value);
+        await pool.query('UPDATE site_settings SET setting_value = ? WHERE setting_key = ?', [encrypted, row.setting_key]);
+        console.log(`🔒 Encrypted existing secret: ${row.setting_key}`);
+      }
+    }
+  } catch (err) {
+    console.error('Secret encryption migration error:', err);
   }
 
   // ─── Mark stale pending donations/memberships (>1 day) as expired on startup ───

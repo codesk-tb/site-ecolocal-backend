@@ -48,7 +48,7 @@ router.put('/:id', authenticate, requireAdmin, async (req, res) => {
   try {
     const { name, role, bio, image_url, email, display_order } = req.body;
     await pool.query(
-      'UPDATE team_members SET name = ?, role = ?, bio = ?, image_url = ?, email = ?, display_order = ?, updated_at = NOW() WHERE id = ?',
+      'UPDATE team_members SET name = ?, role = ?, bio = ?, image_url = ?, email = ?, display_order = ? WHERE id = ?',
       [name, role || null, bio || null, image_url || null, email || null, display_order || 0, req.params.id]
     );
     const [rows] = await pool.query('SELECT * FROM team_members WHERE id = ?', [req.params.id]);
