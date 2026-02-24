@@ -137,6 +137,7 @@ app.listen(PORT, async () => {
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'email_smtp_secure', 'false', 'boolean', 'SSL/TLS', 'Utiliser SSL (true pour port 465)', 'emails', 12)",
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'email_smtp_user', '', 'text', 'Utilisateur SMTP', 'Nom d\'utilisateur SMTP (ex: resend)', 'emails', 13)",
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'email_from_address', '', 'text', 'Email expéditeur', 'Adresse email utilisée comme expéditeur (ex: test@devnotifs.com)', 'emails', 15)",
+    "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'email_from_name', '', 'text', 'Nom expéditeur', 'Nom affiché comme expéditeur des emails', 'emails', 16)",
     "INSERT IGNORE INTO site_settings (id, setting_key, setting_value, setting_type, label, description, category, display_order) VALUES (UUID(), 'email_smtp_pass', '', 'secret', 'Mot de passe SMTP', 'Mot de passe ou mot de passe d\\'application', 'emails', 14)",
     // Update labels for email settings
     "UPDATE site_settings SET label = 'Fournisseur d\\'email', description = 'Nodemailer (SMTP) pour envoyer par email, ou Aucun pour consulter sur le site' WHERE setting_key = 'email_provider'",
