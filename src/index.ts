@@ -223,6 +223,10 @@ app.listen(PORT, async () => {
     // Add attempts column to two_factor_codes and password_resets for brute-force protection
     'ALTER TABLE two_factor_codes ADD COLUMN attempts INT NOT NULL DEFAULT 0',
     'ALTER TABLE password_resets ADD COLUMN attempts INT NOT NULL DEFAULT 0',
+    // Evolution timeline image on About page (with zoom toggle)
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label) VALUES (UUID(), 'about', 'evolution_title', 'Évolution de l\\'association', 'text', 'Titre image évolution')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label) VALUES (UUID(), 'about', 'evolution_image', '', 'image', 'Image frise évolution')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label) VALUES (UUID(), 'about', 'evolution_zoom_enabled', 'true', 'toggle', 'Activer le zoom au survol')",
   ];
 
   for (const sql of migrations) {
