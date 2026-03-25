@@ -8,7 +8,7 @@ const router = Router();
 // GET /api/articles — public list with optional category, search, pagination
 router.get('/', optionalAuth, async (req, res) => {
   try {
-    const { category, search, page = '1', limit = '12', published } = req.query;
+    const { category, search, page = '1', limit = '12', published, home } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
     
     let query = `SELECT a.*, c.name as category_name, c.slug as category_slug,
@@ -31,6 +31,10 @@ router.get('/', optionalAuth, async (req, res) => {
     if (search) {
       conditions.push('(a.title LIKE ? OR a.excerpt LIKE ?)');
       params.push(`%${search}%`, `%${search}%`);
+    }
+
+    if (home === 'true') {
+      conditions.push('a.show_on_home = true');
     }
 
     if (conditions.length > 0) {
@@ -93,15 +97,15 @@ router.get('/:slug', optionalAuth, async (req, res) => {
 // POST /api/articles — admin only
 router.post('/', authenticate, requireAdmin, async (req, res) => {
   try {
-    const { title, slug, excerpt, content, image_url, video_url, category_id, published, members_only, background_color } = req.body;
+    const { title, slug, excerpt, content, image_url, video_url, category_id, published, members_only, background_color, show_on_home } = req.body;
     const isPublished = published ?? false;
     const authorId = req.user?.id || null;
     
     const id = require('uuid').v4();
     await pool.query(
-      `INSERT INTO articles (id, title, slug, excerpt, content, image_url, video_url, category_id, published, members_only, background_color, author_id, published_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, title, slug, excerpt || null, content || null, image_url || null, video_url || null, category_id || null, isPublished, members_only ?? false, background_color || null, authorId, isPublished ? new Date() : null]
+      `INSERT INTO articles (id, title, slug, excerpt, content, image_url, video_url, category_id, published, members_only, show_on_home, background_color, author_id, published_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, title, slug, excerpt || null, content || null, image_url || null, video_url || null, category_id || null, isPublished, members_only ?? false, show_on_home ?? false, background_color || null, authorId, isPublished ? new Date() : null]
     );
 
     const [rows] = await pool.query('SELECT * FROM articles WHERE id = ?', [id]);
@@ -122,12 +126,12 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
 // PUT /api/articles/:id — admin only
 router.put('/:id', authenticate, requireAdmin, async (req, res) => {
   try {
-    const { title, slug, excerpt, content, image_url, video_url, category_id, published, members_only, background_color } = req.body;
+    const { title, slug, excerpt, content, image_url, video_url, category_id, published, members_only, background_color, show_on_home } = req.body;
     const isPublished = published ?? false;
 
     // If publishing for the first time, set published_at
     let publishedAtClause = '';
-    const updateParams: any[] = [title, slug, excerpt || null, content || null, image_url || null, video_url || null, category_id || null, isPublished, members_only ?? false, background_color || null];
+    const updateParams: any[] = [title, slug, excerpt || null, content || null, image_url || null, video_url || null, category_id || null, isPublished, members_only ?? false, show_on_home ?? false, background_color || null];
     if (isPublished) {
       publishedAtClause = ', published_at = COALESCE(published_at, NOW())';
     } else {
@@ -136,7 +140,7 @@ router.put('/:id', authenticate, requireAdmin, async (req, res) => {
     
     await pool.query(
       `UPDATE articles SET title = ?, slug = ?, excerpt = ?, content = ?, image_url = ?, video_url = ?,
-       category_id = ?, published = ?, members_only = ?, background_color = ?, updated_at = NOW()${publishedAtClause}
+       category_id = ?, published = ?, members_only = ?, show_on_home = ?, background_color = ?, updated_at = NOW()${publishedAtClause}
        WHERE id = ?`,
       [...updateParams, req.params.id]
     );

@@ -12,6 +12,8 @@ import { isSecretKey, encrypt } from './utils/crypto';
 import authRoutes from './routes/auth';
 import articlesRoutes from './routes/articles';
 import projectsRoutes from './routes/projects';
+import projectSectionsRoutes from './routes/projectSections';
+import projectFilesRoutes from './routes/project-files';
 import eventsRoutes from './routes/events';
 import categoriesRoutes from './routes/categories';
 import commentsRoutes from './routes/comments';
@@ -22,6 +24,7 @@ import newsletterRoutes from './routes/newsletter';
 import teamRoutes from './routes/team';
 import partnersRoutes from './routes/partners';
 import testimonialsRoutes from './routes/testimonials';
+import vignettesRoutes from './routes/vignettes';
 import siteContentRoutes from './routes/siteContent';
 import siteSettingsRoutes from './routes/siteSettings';
 import newsRoutes from './routes/news';
@@ -79,6 +82,8 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 app.use('/api/auth', authRoutes);
 app.use('/api/articles', articlesRoutes);
 app.use('/api/projects', projectsRoutes);
+app.use('/api/project-sections', projectSectionsRoutes);
+app.use('/api/project-files', projectFilesRoutes);
 app.use('/api/events', eventsRoutes);
 app.use('/api/categories', categoriesRoutes);
 app.use('/api/comments', commentsRoutes);
@@ -89,6 +94,7 @@ app.use('/api/newsletter', newsletterRoutes);
 app.use('/api/team', teamRoutes);
 app.use('/api/partners', partnersRoutes);
 app.use('/api/testimonials', testimonialsRoutes);
+app.use('/api/vignettes', vignettesRoutes);
 app.use('/api/site-content', siteContentRoutes);
 app.use('/api/site-settings', siteSettingsRoutes);
 app.use('/api/news', newsRoutes);
@@ -143,6 +149,15 @@ app.listen(PORT, async () => {
     "UPDATE site_settings SET label = 'Fournisseur d\\'email', description = 'Nodemailer (SMTP) pour envoyer par email, ou Aucun pour consulter sur le site' WHERE setting_key = 'email_provider'",
     "UPDATE site_settings SET label = 'Nom expéditeur', description = 'Nom affiché comme expéditeur des emails' WHERE setting_key = 'email_from_name'",
     "UPDATE site_settings SET label = 'Destinataire contact', description = 'Email qui reçoit les messages du formulaire de contact' WHERE setting_key = 'email_contact_recipient'",
+    // Vignettes table (thumbnails for home page hero section)
+    `CREATE TABLE IF NOT EXISTS vignettes (
+      id VARCHAR(36) PRIMARY KEY,
+      image_url TEXT DEFAULT NULL,
+      display_order INT NOT NULL DEFAULT 0,
+      published TINYINT(1) NOT NULL DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )`,
     // Newsletter sends history table
     `CREATE TABLE IF NOT EXISTS newsletter_sends (
       id VARCHAR(36) PRIMARY KEY,
@@ -223,14 +238,179 @@ app.listen(PORT, async () => {
     // Add attempts column to two_factor_codes and password_resets for brute-force protection
     'ALTER TABLE two_factor_codes ADD COLUMN attempts INT NOT NULL DEFAULT 0',
     'ALTER TABLE password_resets ADD COLUMN attempts INT NOT NULL DEFAULT 0',
+    // Homepage flag for articles
+    'ALTER TABLE articles ADD COLUMN show_on_home TINYINT(1) NOT NULL DEFAULT 0',
     // Evolution timeline image on About page (with zoom toggle)
     "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label) VALUES (UUID(), 'about', 'evolution_title', 'Évolution de l\\'association', 'text', 'Titre image évolution')",
     "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label) VALUES (UUID(), 'about', 'evolution_image', '', 'image', 'Image frise évolution')",
     "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label) VALUES (UUID(), 'about', 'evolution_zoom_enabled', 'true', 'toggle', 'Activer le zoom au survol')",
+    // ═══ Phase 1: Amélioration back-office site_content ═══
+    'ALTER TABLE site_content ADD COLUMN display_order INT NOT NULL DEFAULT 0',
+    'ALTER TABLE site_content ADD COLUMN section VARCHAR(100) DEFAULT NULL',
+    'ALTER TABLE site_content ADD COLUMN description TEXT DEFAULT NULL',
+    // Remove legacy interactive bubbles feature
+    'DROP TABLE IF EXISTS interactive_bubbles',
+    "DELETE FROM site_content WHERE content_key IN ('bubbles_title', 'bubbles_description')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'home', 'hero_scroll_image', '', 'image', 'Image de transition (scroll)', 'hero', 5, 'Image affichée juste sous la bannière avec un effet de descente au scroll')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'home', 'hero_scroll_title', 'Titre à afficher', 'text', 'Titre animation transition (H2)', 'hero', 6, 'Texte H2 affiché sur l''image de transition et synchronisé avec son animation')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'home', 'hero_scroll_title_align', 'center', 'text', 'Alignement titre animation (H2)', 'hero', 7, 'Position du titre H2 sur l''image de transition: centre-gauche, centre, centre-droite')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'home', 'news_trailer_video_url', '', 'text', 'Vidéo bande-annonce (URL)', 'news', 2, 'URL YouTube/Vimeo ou fichier MP4 affichée en grand dans la section actualités de la page d''accueil')",
+    // ═══ Phase 8: Configuration labels et ordre des champs ═══
+    // Home - Hero section
+    "UPDATE site_content SET section='hero', display_order=1, label='Badge au-dessus du titre', description='Petit texte affiché au-dessus du titre principal (ex: Association écologique)' WHERE page_key='home' AND content_key='hero_badge'",
+    "UPDATE site_content SET section='hero', display_order=2, label='Titre principal', description='Le grand titre de la bannière d\\'accueil' WHERE page_key='home' AND content_key='hero_title'",
+    "UPDATE site_content SET section='hero', display_order=3, label='Sous-titre / Description', description='Texte descriptif sous le titre principal' WHERE page_key='home' AND content_key='hero_subtitle'",
+    "UPDATE site_content SET section='hero', display_order=4, label='Image de fond', description='Image d\\'arrière-plan de la bannière d\\'accueil' WHERE page_key='home' AND content_key='hero_image'",
+    "UPDATE site_content SET section='hero', display_order=5, label='Image de transition (scroll)', description='Image affichée juste sous la bannière avec un effet de descente au scroll' WHERE page_key='home' AND content_key='hero_scroll_image'",
+    "UPDATE site_content SET section='hero', display_order=6, label='Titre animation transition (H2)', description='Texte H2 affiché sur l''image de transition et synchronisé avec son animation' WHERE page_key='home' AND content_key='hero_scroll_title'",
+    "UPDATE site_content SET section='hero', display_order=7, label='Alignement titre animation (H2)', description='Position du titre H2 sur l''image de transition: centre-gauche, centre, centre-droite' WHERE page_key='home' AND content_key='hero_scroll_title_align'",
+    // Home - Mission section
+    "UPDATE site_content SET section='mission', display_order=1, label='Titre mission', description='Titre de la section présentation de la mission' WHERE page_key='home' AND content_key='mission_title'",
+    "UPDATE site_content SET section='mission', display_order=2, label='Description mission', description='Texte décrivant la mission de l\\'association' WHERE page_key='home' AND content_key='mission_description'",
+    // Home - Features section
+    "UPDATE site_content SET section='fonctionnalites', display_order=1, label='Fonctionnalité 1 - Titre', description='Titre de la première fonctionnalité' WHERE page_key='home' AND content_key='feature_1_title'",
+    "UPDATE site_content SET section='fonctionnalites', display_order=2, label='Fonctionnalité 1 - Description', description='Description de la première fonctionnalité' WHERE page_key='home' AND content_key='feature_1_description'",
+    "UPDATE site_content SET section='fonctionnalites', display_order=3, label='Fonctionnalité 2 - Titre', description='Titre de la deuxième fonctionnalité' WHERE page_key='home' AND content_key='feature_2_title'",
+    "UPDATE site_content SET section='fonctionnalites', display_order=4, label='Fonctionnalité 2 - Description', description='Description de la deuxième fonctionnalité' WHERE page_key='home' AND content_key='feature_2_description'",
+    "UPDATE site_content SET section='fonctionnalites', display_order=5, label='Fonctionnalité 3 - Titre', description='Titre de la troisième fonctionnalité' WHERE page_key='home' AND content_key='feature_3_title'",
+    "UPDATE site_content SET section='fonctionnalites', display_order=6, label='Fonctionnalité 3 - Description', description='Description de la troisième fonctionnalité' WHERE page_key='home' AND content_key='feature_3_description'",
+    // Home - Newsletter section
+    "UPDATE site_content SET section='newsletter', display_order=1, label='Titre newsletter', description='Titre de la section inscription newsletter' WHERE page_key='home' AND content_key='newsletter_title'",
+    "UPDATE site_content SET section='newsletter', display_order=2, label='Description newsletter', description='Texte invitant à s\\'inscrire à la newsletter' WHERE page_key='home' AND content_key='newsletter_description'",
+    "UPDATE site_content SET section='newsletter', display_order=3, label='Image de fond newsletter', description='Image d\\'arrière-plan de la section newsletter' WHERE page_key='home' AND content_key='newsletter_bg_image'",
+    // Home - News section
+    "UPDATE site_content SET section='news', display_order=1, label='Titre actualités', description='Titre de la section actualités de la page d\'accueil' WHERE page_key='home' AND content_key='news_title'",
+    "UPDATE site_content SET section='news', display_order=2, label='Vidéo bande-annonce (URL)', description='URL YouTube/Vimeo ou fichier MP4 affichée en grand sous le titre de la section actualités' WHERE page_key='home' AND content_key='news_trailer_video_url'",
+    "UPDATE site_content SET section='news', display_order=3, label='Description actualités', description='Texte descriptif sous la vidéo de la section actualités' WHERE page_key='home' AND content_key='news_description'",
+    // About page - Hero section
+    "UPDATE site_content SET section='hero', display_order=1, label='Titre de la page', description='Titre principal de la page À propos' WHERE page_key='about' AND content_key='hero_title'",
+    "UPDATE site_content SET section='hero', display_order=2, label='Sous-titre', description='Description sous le titre de la page' WHERE page_key='about' AND content_key='hero_subtitle'",
+    // About page - Stats section
+    "UPDATE site_content SET section='statistiques', display_order=1, label='Statistique 1 - Libellé', description='Nom de la première statistique (ex: Adhérents)' WHERE page_key='about' AND content_key='stat_1_label'",
+    "UPDATE site_content SET section='statistiques', display_order=2, label='Statistique 1 - Valeur', description='Valeur de la première statistique (ex: 150+)' WHERE page_key='about' AND content_key='stat_1_value'",
+    "UPDATE site_content SET section='statistiques', display_order=3, label='Statistique 2 - Libellé', description='Nom de la deuxième statistique' WHERE page_key='about' AND content_key='stat_2_label'",
+    "UPDATE site_content SET section='statistiques', display_order=4, label='Statistique 2 - Valeur', description='Valeur de la deuxième statistique' WHERE page_key='about' AND content_key='stat_2_value'",
+    "UPDATE site_content SET section='statistiques', display_order=5, label='Statistique 3 - Libellé', description='Nom de la troisième statistique' WHERE page_key='about' AND content_key='stat_3_label'",
+    "UPDATE site_content SET section='statistiques', display_order=6, label='Statistique 3 - Valeur', description='Valeur de la troisième statistique' WHERE page_key='about' AND content_key='stat_3_value'",
+    "UPDATE site_content SET section='statistiques', display_order=7, label='Statistique 4 - Libellé', description='Nom de la quatrième statistique' WHERE page_key='about' AND content_key='stat_4_label'",
+    "UPDATE site_content SET section='statistiques', display_order=8, label='Statistique 4 - Valeur', description='Valeur de la quatrième statistique' WHERE page_key='about' AND content_key='stat_4_value'",
+    // About page - Story section
+    "UPDATE site_content SET section='histoire', display_order=1, label='Titre histoire', description='Titre de la section Notre histoire' WHERE page_key='about' AND content_key='story_title'",
+    "UPDATE site_content SET section='histoire', display_order=2, label='Contenu histoire', description='Texte racontant l\\'histoire de l\\'association' WHERE page_key='about' AND content_key='story_content'",
+    "UPDATE site_content SET section='histoire', display_order=3, label='Image de fond histoire', description='Image d\\'arrière-plan de la section histoire' WHERE page_key='about' AND content_key='story_bg_image'",
+    // About page - Evolution/Timeline section
+    "UPDATE site_content SET section='evolution', display_order=1, label='Titre frise chronologique', description='Titre au-dessus de l\\'image d\\'évolution' WHERE page_key='about' AND content_key='evolution_title'",
+    "UPDATE site_content SET section='evolution', display_order=2, label='Image frise chronologique', description='Image représentant l\\'évolution de l\\'association' WHERE page_key='about' AND content_key='evolution_image'",
+    "UPDATE site_content SET section='evolution', display_order=3, label='Activer zoom au survol', description='Permet de zoomer sur l\\'image au passage de la souris' WHERE page_key='about' AND content_key='evolution_zoom_enabled'",
+    // About page - Values section
+    "UPDATE site_content SET section='valeurs', display_order=1, label='Titre section valeurs', description='Titre de la section Nos valeurs' WHERE page_key='about' AND content_key='values_title'",
+    "UPDATE site_content SET section='valeurs', display_order=2, label='Valeur 1 - Titre', description='Nom de la première valeur' WHERE page_key='about' AND content_key='value_1_title'",
+    "UPDATE site_content SET section='valeurs', display_order=3, label='Valeur 1 - Description', description='Description de la première valeur' WHERE page_key='about' AND content_key='value_1_description'",
+    "UPDATE site_content SET section='valeurs', display_order=4, label='Valeur 2 - Titre', description='Nom de la deuxième valeur' WHERE page_key='about' AND content_key='value_2_title'",
+    "UPDATE site_content SET section='valeurs', display_order=5, label='Valeur 2 - Description', description='Description de la deuxième valeur' WHERE page_key='about' AND content_key='value_2_description'",
+    "UPDATE site_content SET section='valeurs', display_order=6, label='Valeur 3 - Titre', description='Nom de la troisième valeur' WHERE page_key='about' AND content_key='value_3_title'",
+    "UPDATE site_content SET section='valeurs', display_order=7, label='Valeur 3 - Description', description='Description de la troisième valeur' WHERE page_key='about' AND content_key='value_3_description'",
+    "UPDATE site_content SET section='valeurs', display_order=8, label='Valeur 4 - Titre', description='Nom de la quatrième valeur' WHERE page_key='about' AND content_key='value_4_title'",
+    "UPDATE site_content SET section='valeurs', display_order=9, label='Valeur 4 - Description', description='Description de la quatrième valeur' WHERE page_key='about' AND content_key='value_4_description'",
+    // About page - Team section
+    "UPDATE site_content SET section='equipe', display_order=1, label='Titre section équipe', description='Titre de la section Notre équipe' WHERE page_key='about' AND content_key='team_title'",
+    "UPDATE site_content SET section='equipe', display_order=2, label='Description équipe', description='Texte de présentation de l\\'équipe' WHERE page_key='about' AND content_key='team_description'",
+    // Discover page (new)
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'discover', 'hero_title', 'Découvrez ECOLOCAL', 'text', 'Titre principal', 'hero', 1, 'Titre de la bannière de la page Découvrez-nous')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'discover', 'hero_subtitle', 'Une association citoyenne engagée pour la transition écologique dans l\\'Hérault', 'textarea', 'Sous-titre', 'hero', 2, 'Description sous le titre de la page')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'discover', 'hero_image', '', 'image', 'Image de fond', 'hero', 3, 'Image d\\'arrière-plan de la bannière')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'discover', 'hero_title_color', '#319A78', 'text', 'Couleur titre bannière', 'hero', 4, 'Couleur du titre principal de la bannière (hex, ex: #319A78)')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'discover', 'hero_subtitle_color', '#319A78', 'text', 'Couleur sous-titre bannière', 'hero', 5, 'Couleur du sous-titre de la bannière (hex ou rgba)')",
+    "UPDATE site_content SET content_value='#319A78' WHERE page_key='discover' AND content_key='hero_title_color' AND content_value IN ('#ffffff', '#fff')",
+    "UPDATE site_content SET content_value='#319A78' WHERE page_key='discover' AND content_key='hero_subtitle_color' AND content_value IN ('#ffffff', '#fff', 'rgba(255,255,255,0.9)')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'discover', 'intro_title', 'Qui sommes-nous ?', 'text', 'Titre introduction', 'introduction', 1, 'Titre de la section d\\'introduction')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'discover', 'intro_content', 'ECOLOCAL est une association citoyenne dédiée à la transition écologique locale.', 'textarea', 'Contenu introduction', 'introduction', 2, 'Texte de présentation de l\\'association')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'discover', 'timeline_title', 'Évolution de l\\'association', 'text', 'Titre frise chronologique', 'evolution', 1, 'Titre de la section frise chronologique sur Découvrez-nous')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'discover', 'timeline_image', '', 'image', 'Image frise chronologique', 'evolution', 2, 'Image de la frise affichée sur Découvrez-nous')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'discover', 'timeline_zoom_enabled', 'true', 'toggle', 'Activer zoom frise', 'evolution', 3, 'Active un léger zoom de la frise au survol')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'discover', 'cta_title', 'Rejoignez le mouvement', 'text', 'Titre appel à action', 'cta', 1, 'Titre du bloc final d\\'appel à l\\'action')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'discover', 'cta_description', 'Ensemble, construisons un avenir plus durable pour notre territoire. Devenez membre ou soutenez nos actions.', 'textarea', 'Description appel à action', 'cta', 2, 'Texte principal du bloc final')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'discover', 'cta_primary_label', 'Devenir adhérent', 'text', 'Bouton principal - libellé', 'cta', 3, 'Texte du bouton principal')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'discover', 'cta_primary_url', '/don?mode=membre', 'text', 'Bouton principal - URL', 'cta', 4, 'Lien du bouton principal')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'discover', 'cta_secondary_label', 'Faire un don', 'text', 'Bouton secondaire - libellé', 'cta', 5, 'Texte du bouton secondaire')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'discover', 'cta_secondary_url', '/don', 'text', 'Bouton secondaire - URL', 'cta', 6, 'Lien du bouton secondaire')",
+    // Projects page
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'projects', 'hero_title', 'Nos projets', 'text', 'Titre bannière', 'hero', 1, 'Titre principal de la page Projets')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'projects', 'hero_subtitle', 'Découvrez les initiatives portées par Ecolocal pour construire un territoire plus durable et solidaire.', 'textarea', 'Description bannière', 'hero', 2, 'Texte sous le titre principal de la bannière')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'projects', 'hero_image', 'https://images.unsplash.com/photo-1466692476868-aef1dfb1e735?w=1920', 'image', 'Image de fond bannière', 'hero', 3, 'Image d\\'arrière-plan de la bannière Projets')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'projects', 'tabs_current_label', 'En cours', 'text', 'Onglet projets en cours', 'liste', 1, 'Texte affiché sur l\\'onglet des projets en cours')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'projects', 'tabs_past_label', 'Passés', 'text', 'Onglet projets passés', 'liste', 2, 'Texte affiché sur l\\'onglet des projets terminés')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'projects', 'cta_title', 'Vous avez une idée de projet ?', 'text', 'Titre appel à action', 'cta', 1, 'Titre du bloc final')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'projects', 'cta_description', 'Nous sommes toujours à la recherche de nouvelles initiatives. Partagez votre idée avec nous !', 'textarea', 'Description appel à action', 'cta', 2, 'Description du bloc final')",
+    // Events page
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'events', 'hero_title', 'Nos Événements', 'text', 'Titre bannière', 'hero', 1, 'Titre principal de la page Événements')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'events', 'hero_subtitle', 'Rejoignez-nous lors de nos événements et actions sur le terrain. Ensemble, agissons pour un avenir durable.', 'textarea', 'Description bannière', 'hero', 2, 'Texte sous le titre principal')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'events', 'hero_image', '', 'image', 'Image de fond bannière', 'hero', 3, 'Image d\\'arrière-plan de la bannière Événements')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'events', 'filter_upcoming_label', 'À venir', 'text', 'Filtre événements à venir', 'liste', 1, 'Texte du bouton de filtre des événements futurs')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'events', 'filter_past_label', 'Passés', 'text', 'Filtre événements passés', 'liste', 2, 'Texte du bouton de filtre des événements passés')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'events', 'empty_upcoming_title', 'Aucun événement à venir', 'text', 'Message vide - titre (à venir)', 'messages', 1, 'Titre affiché quand aucun événement à venir n\\'est disponible')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'events', 'empty_upcoming_description', 'Revenez bientôt pour découvrir nos prochains événements !', 'textarea', 'Message vide - description (à venir)', 'messages', 2, 'Description affichée quand aucun événement futur n\\'est disponible')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'events', 'empty_past_title', 'Aucun événement passé', 'text', 'Message vide - titre (passés)', 'messages', 3, 'Titre affiché quand aucun événement passé n\\'est disponible')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'events', 'empty_past_description', 'Consultez nos événements à venir.', 'textarea', 'Message vide - description (passés)', 'messages', 4, 'Description affichée quand aucun événement passé n\\'est disponible')",
+    // News page
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'news', 'hero_badge', 'Nos dernières nouvelles', 'text', 'Badge bannière', 'hero', 1, 'Texte du badge affiché au-dessus du titre')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'news', 'hero_title', 'Actualités', 'text', 'Titre bannière', 'hero', 2, 'Titre principal de la page Actualités')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'news', 'hero_subtitle', 'Suivez les dernières nouvelles d\\'Ecolocal : événements, projets, partenariats et initiatives écologiques.', 'textarea', 'Description bannière', 'hero', 3, 'Texte sous le titre principal')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'news', 'hero_image', 'https://images.unsplash.com/photo-1504711434969-e33886168f5c?w=1920', 'image', 'Image de fond bannière', 'hero', 4, 'Image d\\'arrière-plan de la bannière Actualités')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'news', 'sort_date_label', 'Date', 'text', 'Tri par date', 'filtres', 1, 'Libellé du bouton de tri par date')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'news', 'sort_views_label', 'Vues', 'text', 'Tri par vues', 'filtres', 2, 'Libellé du bouton de tri par nombre de vues')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'news', 'sort_comments_label', 'Commentaires', 'text', 'Tri par commentaires', 'filtres', 3, 'Libellé du bouton de tri par commentaires')",
+    "INSERT IGNORE INTO site_content (id, page_key, content_key, content_value, content_type, label, section, display_order, description) VALUES (UUID(), 'news', 'empty_title', 'Aucune actualité pour le moment.', 'text', 'Message vide - titre', 'messages', 1, 'Titre affiché si aucune actualité n\\'est disponible')",
+    // Labels plus explicites
+    "UPDATE site_content SET label='Description bannière', description='Texte descriptif sous le titre principal de la bannière' WHERE page_key='home' AND content_key='hero_subtitle'",
+    "UPDATE site_content SET label='Description bannière', description='Texte descriptif sous le titre principal de la bannière' WHERE page_key='about' AND content_key='hero_subtitle'",
+    "UPDATE site_content SET label='Description bannière', description='Texte descriptif sous le titre principal de la bannière' WHERE page_key='discover' AND content_key='hero_subtitle'",
+    // Project sections table (for discover page: customizable project zones with image, title, description, link, and layout)
+    `CREATE TABLE IF NOT EXISTS project_sections (
+      id VARCHAR(36) PRIMARY KEY,
+      title VARCHAR(500) NOT NULL,
+      description TEXT NOT NULL,
+      main_image_url TEXT DEFAULT NULL,
+      thumbnail_image_url TEXT DEFAULT NULL,
+      link_url VARCHAR(500) DEFAULT NULL,
+      layout VARCHAR(50) NOT NULL DEFAULT 'text-right',
+      display_order INT NOT NULL DEFAULT 0,
+      published TINYINT(1) NOT NULL DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )`,
+    'ALTER TABLE project_sections ADD COLUMN title_color VARCHAR(7) DEFAULT "#000000"',
+    'ALTER TABLE project_sections ADD COLUMN description_color VARCHAR(7) DEFAULT "#666666"',
+    'ALTER TABLE project_sections ADD COLUMN title_html TEXT',
+    'ALTER TABLE project_sections ADD COLUMN main_image_urls TEXT',
+    'ALTER TABLE project_sections ADD COLUMN thumbnail_position VARCHAR(10) DEFAULT "right"',
+    `CREATE TABLE IF NOT EXISTS project_files (
+      id VARCHAR(36) PRIMARY KEY,
+      project_section_id VARCHAR(36) NOT NULL,
+      file_url TEXT NOT NULL,
+      file_name VARCHAR(500) NOT NULL,
+      file_size INT DEFAULT NULL,
+      file_type VARCHAR(120) DEFAULT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (project_section_id) REFERENCES project_sections(id) ON DELETE CASCADE
+    )`,
   ];
 
   for (const sql of migrations) {
-    try { await pool.query(sql); } catch (_) { /* column/row already exists */ }
+    try { 
+      await pool.query(sql);
+      if (sql.includes('vignettes')) {
+        console.log('✅ Vignettes migration executed');
+      }
+      if (sql.includes('project_sections')) {
+        console.log('✅ Project sections migration executed');
+      }
+      if (sql.includes('project_files')) {
+        console.log('✅ Project files migration executed');
+      }
+    } catch (err) {
+      console.error('❌ Migration error:', err instanceof Error ? err.message : err);
+    }
   }
 
   // ─── Encrypt any plaintext secrets still in site_settings ───
